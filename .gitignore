@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.agentdesk/
+.vite/
+*.log
+.env
+.env.local
+coverage/
