@@ -20,10 +20,11 @@ import type {
 const API = import.meta.env.VITE_API_BASE ?? "";
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
+  const hasJsonBody = init?.body != null && !(init.body instanceof FormData);
   const response = await fetch(`${API}${url}`, {
     ...init,
     headers: {
-      ...(init?.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
+      ...(hasJsonBody ? { "Content-Type": "application/json" } : {}),
       ...init?.headers,
     },
   });

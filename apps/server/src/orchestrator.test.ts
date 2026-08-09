@@ -14,6 +14,68 @@ afterEach(() => {
 });
 
 describe("Orchestrator follow-up", () => {
+  it("interrupts persisted sessions even when the adapter runtime is gone", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agentdesk-orchestrator-interrupt-"));
+    tempDirs.push(dir);
+    const store = new Store(path.join(dir, "test.db"));
+    const events = new EventBus(store);
+    const interrupt = vi.fn(async () => {
+      throw new Error("runtime unavailable");
+    });
+    const adapter: AgentAdapter = {
+      provider: "codex",
+      detect: async () => ({ provider: "codex", installed: true, command: "codex" }),
+      start: async () => {},
+      steer: async () => {},
+      resolve: async () => {},
+      interrupt,
+    };
+    const task = store.createTask({ title: "stale runtime", provider: "codex", repositories: [] });
+    const session = store.createSession(task.id, "codex");
+    store.updateSession(session.id, { status: "waiting_user" });
+    const interaction = store.createInteraction({
+      taskId: task.id,
+      sessionId: session.id,
+      agentRequestId: "approval-1",
+      method: "item/commandExecution/requestApproval",
+      type: "command_approval",
+      payload: {},
+    });
+    const orchestrator = new Orchestrator(store, events, [adapter]);
+
+    await expect(orchestrator.interrupt(task.id)).resolves.toBeUndefined();
+
+    expect(interrupt).toHaveBeenCalledWith(session.id);
+    expect(store.getTask(task.id)?.sessions[0]?.status).toBe("interrupted");
+    expect(store.getInteraction(interaction.id)?.status).toBe("cancelled");
+    expect(store.events(task.id).at(-1)?.payload).toMatchObject({
+      status: "interrupted",
+      adapterError: "runtime unavailable",
+    });
+    store.close();
+  });
+
+  it("treats repeated interrupts as a successful no-op", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agentdesk-orchestrator-idempotent-"));
+    tempDirs.push(dir);
+    const store = new Store(path.join(dir, "test.db"));
+    const events = new EventBus(store);
+    const adapter: AgentAdapter = {
+      provider: "codex",
+      detect: async () => ({ provider: "codex", installed: true, command: "codex" }),
+      start: async () => {},
+      steer: async () => {},
+      resolve: async () => {},
+      interrupt: async () => {},
+    };
+    const task = store.createTask({ title: "already stopped", provider: "codex", repositories: [] });
+    const orchestrator = new Orchestrator(store, events, [adapter]);
+
+    await expect(orchestrator.interrupt(task.id)).resolves.toBeUndefined();
+    await expect(orchestrator.interrupt(task.id)).resolves.toBeUndefined();
+    store.close();
+  });
+
   it("reuses a completed Codex session and its thread for the next turn", async () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), "agentdesk-orchestrator-"));
     tempDirs.push(dir);

@@ -95,9 +95,6 @@ const agentMeta: Record<AgentProvider, { name: string; runtime: string }> = {
   "qwen-code": { name: "Qwen Code", runtime: "Stream JSON CLI" },
 };
 
-const defaultDevelopmentPrompt =
-  "请先阅读需求材料并分析关联仓库，给出实现方案。确认条件完整后再开始修改代码，完成后运行相关测试。";
-
 function taskStatusLabel(task: Task) {
   return statusText[task.status];
 }
@@ -400,7 +397,7 @@ function TaskDetail({
   onChanged(): void;
   notify(message: string): void;
 }) {
-  const [prompt, setPrompt] = useState(defaultDevelopmentPrompt);
+  const [prompt, setPrompt] = useState("");
   const [composerOpen, setComposerOpen] = useState(false);
   const [debugOpen, setDebugOpen] = useState(false);
   const [codeChangesOpen, setCodeChangesOpen] = useState(false);
@@ -413,7 +410,7 @@ function TaskDetail({
   const busy = task.sessions.some((session) => ["starting", "running", "waiting_user"].includes(session.status));
 
   useEffect(() => {
-    setPrompt(defaultDevelopmentPrompt);
+    setPrompt("");
     setComposerOpen(false);
   }, [task.id]);
 

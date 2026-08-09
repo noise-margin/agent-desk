@@ -73,11 +73,38 @@ export class Orchestrator {
 
   async interrupt(taskId: string) {
     const task = this.store.getTask(taskId);
-    const session = task?.sessions.find((item) =>
+    if (!task) throw new Error("任务不存在");
+
+    const sessions = task.sessions.filter((item) =>
       ["starting", "running", "waiting_user"].includes(item.status),
     );
-    if (!task || !session) throw new Error("没有正在运行的 Agent 会话");
-    await this.adapters.get(session.provider)?.interrupt(session.id);
+    for (const session of sessions) {
+      let adapterError: string | undefined;
+      try {
+        await this.adapters.get(session.provider)?.interrupt(session.id);
+      } catch (error) {
+        // A persisted session can outlive its in-memory adapter runtime. The
+        // user's interrupt must still reconcile local state in that case.
+        adapterError = error instanceof Error ? error.message : String(error);
+      }
+
+      const current = this.store
+        .getTask(taskId)
+        ?.sessions.find((item) => item.id === session.id);
+      if (current && ["starting", "running", "waiting_user"].includes(current.status)) {
+        this.store.updateSession(session.id, { status: "interrupted" });
+      }
+      for (const interaction of task.interactions.filter(
+        (item) => item.sessionId === session.id && item.status === "pending",
+      )) {
+        this.store.resolveInteraction(interaction.id, "cancelled");
+      }
+      this.events.publish(taskId, session.id, "session.status", {
+        status: "interrupted",
+        reason: "user",
+        ...(adapterError ? { adapterError } : {}),
+      });
+    }
   }
 
   async followUp(taskId: string, message: string) {
