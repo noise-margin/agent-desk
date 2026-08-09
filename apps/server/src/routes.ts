@@ -51,6 +51,10 @@ const followUpSchema = z.object({
   persist: z.boolean().default(true),
 });
 
+const textMaterialSchema = z.object({
+  content: z.string().trim().min(1, "请输入补充说明").max(100_000, "补充说明不能超过 100000 个字符"),
+});
+
 const resolveSchema = z.object({
   action: z.enum(["accept", "decline", "cancel"]),
   answers: z.record(z.string(), z.array(z.string())).optional(),
@@ -100,11 +104,25 @@ const organizationSchema = z.object({
   collectionId: z.string().uuid().nullable().optional(),
 });
 
+const acceptanceCriteriaSchema = z.object({
+  acceptanceCriteria: z.string().trim().max(50_000, "验收标准不能超过 50000 个字符").nullable(),
+});
+
 const MATERIAL_PREVIEW_LIMIT = 256 * 1024;
 
 function safeName(value: string) {
   const name = path.basename(value).replace(/[^\p{Letter}\p{Number}._ -]/gu, "_");
   return name.slice(0, 160) || "material.bin";
+}
+
+function textMaterialName(content: string) {
+  const firstLine = content.split(/\r?\n/, 1)[0]?.replace(/\s+/g, " ").trim() ?? "";
+  const excerpt = path.basename(firstLine)
+    .replace(/[^\p{Letter}\p{Number}._ -]/gu, "_")
+    .replace(/\.[a-z0-9]+$/i, "")
+    .trim()
+    .slice(0, 24);
+  return `${excerpt || "补充说明"}.md`;
 }
 
 function isWithin(candidate: string, root: string) {
@@ -249,6 +267,27 @@ export async function registerRoutes(
     }
   });
 
+  app.patch<{ Params: { id: string } }>("/api/tasks/:id/acceptance-criteria", async (request, reply) => {
+    const parsed = acceptanceCriteriaSchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message });
+    const existing = store.getTask(request.params.id);
+    if (!existing) return reply.code(404).send({ error: "任务不存在" });
+    const task = store.updateAcceptanceCriteria(request.params.id, parsed.data.acceptanceCriteria ?? undefined);
+    store.addActivity(task.id, "acceptance.updated", {
+      acceptanceCriteria: task.acceptanceCriteria ?? "",
+      cleared: !task.acceptanceCriteria,
+    });
+    const active = task.sessions.find((session) => ["starting", "running", "waiting_user"].includes(session.status));
+    let agentNotified = false;
+    if (active && task.provider === "codex") {
+      const message = task.acceptanceCriteria
+        ? `用户更新了验收标准，请将以下标准纳入当前工作：\n\n${task.acceptanceCriteria}`
+        : "用户清空了单独设置的验收标准，后续请依据需求材料判断完成情况。";
+      agentNotified = await orchestrator.followUp(task.id, message).then(() => true).catch(() => false);
+    }
+    return { task, agentNotified };
+  });
+
   app.get<{
     Params: { id: string };
     Querystring: { before?: string; limit?: string; mode?: string };
@@ -298,6 +337,59 @@ export async function registerRoutes(
         kind: material.kind,
       });
       return reply.code(201).send(material);
+    },
+  );
+
+  app.post<{ Params: { id: string } }>(
+    "/api/tasks/:id/materials/text",
+    async (request, reply) => {
+      const parsed = textMaterialSchema.safeParse(request.body);
+      if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message });
+      const task = store.getTask(request.params.id);
+      if (!task) return reply.code(404).send({ error: "任务不存在" });
+
+      const baseName = textMaterialName(parsed.data.content);
+      let materialName = baseName;
+      let target: string | undefined;
+      if (task.workspacePath) {
+        const baseDir = path.join(task.workspacePath, "materials");
+        await fs.mkdir(baseDir, { recursive: true });
+        target = path.join(baseDir, materialName);
+        try {
+          await fs.access(target);
+          materialName = `${path.parse(baseName).name}-${Date.now()}.md`;
+          target = path.join(baseDir, materialName);
+        } catch {
+          // The target is available.
+        }
+        await fs.writeFile(target, `# 补充说明\n\n${parsed.data.content}\n`, { encoding: "utf8", flag: "wx" });
+      }
+
+      const material = store.addMaterial({
+        taskId: task.id,
+        name: materialName,
+        kind: "text",
+        path: target,
+        content: parsed.data.content,
+      });
+      store.addActivity(task.id, "material.added", {
+        materialId: material.id,
+        name: material.name,
+        kind: material.kind,
+        source: "description",
+      });
+
+      const active = task.sessions.find((session) =>
+        ["starting", "running", "waiting_user"].includes(session.status),
+      );
+      let agentNotified = false;
+      if (active && task.provider === "codex") {
+        agentNotified = await orchestrator
+          .followUp(task.id, `用户新增了补充说明 materials/${material.name}，请立即阅读并纳入当前工作。`)
+          .then(() => true)
+          .catch(() => false);
+      }
+      return reply.code(201).send({ material, agentNotified });
     },
   );
 

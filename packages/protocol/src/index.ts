@@ -103,6 +103,7 @@ export type TaskActivityType =
   | "material.added"
   | "material.removed"
   | "material.restored"
+  | "acceptance.updated"
   | "repository.added"
   | "user.followup"
   | "action.started"

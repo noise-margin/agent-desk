@@ -19,7 +19,7 @@ import {
   GitCompare,
   LoaderCircle,
   MessageSquareText,
-  Play,
+  Pencil,
   Plus,
   RefreshCw,
   Search,
@@ -42,9 +42,11 @@ import {
 } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
+  ActionArtifact,
   AgentEvent,
   AgentProvider,
   CodeDiffFile,
+  CodeSnapshot,
   CreateTaskInput,
   InteractionResolutionPresentation,
   PendingInteraction,
@@ -399,9 +401,12 @@ function TaskDetail({
   notify(message: string): void;
 }) {
   const [prompt, setPrompt] = useState(defaultDevelopmentPrompt);
-  const [tab, setTab] = useState<"timeline" | "workbench">("workbench");
+  const [composerOpen, setComposerOpen] = useState(false);
   const [debugOpen, setDebugOpen] = useState(false);
+  const [codeChangesOpen, setCodeChangesOpen] = useState(false);
   const [previewMaterialId, setPreviewMaterialId] = useState<string>();
+  const [addTextMaterialOpen, setAddTextMaterialOpen] = useState(false);
+  const [editAcceptanceOpen, setEditAcceptanceOpen] = useState(false);
   const [addRepositoryOpen, setAddRepositoryOpen] = useState(false);
   const [addKnowledgeOpen, setAddKnowledgeOpen] = useState(false);
   const pending = task.interactions.filter((item) => item.status === "pending");
@@ -409,8 +414,12 @@ function TaskDetail({
 
   useEffect(() => {
     setPrompt(defaultDevelopmentPrompt);
-    setTab("workbench");
+    setComposerOpen(false);
   }, [task.id]);
+
+  useEffect(() => {
+    if (pending.length > 0) setComposerOpen(true);
+  }, [pending.length]);
 
   const followUp = useMutation({
     mutationFn: () => api.followUp(task.id, prompt, true),
@@ -510,7 +519,6 @@ function TaskDetail({
       <div className="work-area">
         <section className="context-panel">
           <PanelTitle icon={<FileText size={16} />} title="任务上下文" />
-          <TaskOrganizer task={task} onChanged={onChanged} notify={notify} />
           <ContextGroup title="需求材料" count={task.materials.length}>
             {task.materials.map((material) => (
               <div className="material-row" key={material.id}>
@@ -519,8 +527,9 @@ function TaskDetail({
                   onClick={() => setPreviewMaterialId(material.id)}
                   title={`预览 ${material.name}`}
                 >
-                  <FileText size={14} />
-                  <span>{material.name}</span>
+                  {material.kind === "text" ? <MessageSquareText size={14} /> : <FileText size={14} />}
+                  <span>{material.kind === "text" ? material.name.replace(/\.md$/i, "") : material.name}</span>
+                  {material.kind === "text" && <small className="material-kind-badge">补充说明</small>}
                 </button>
                 <button
                   className="material-delete"
@@ -538,24 +547,39 @@ function TaskDetail({
               </div>
             ))}
             {!task.materials.length && <SmallEmpty>暂无需求材料</SmallEmpty>}
-            <label className={`material-upload ${upload.isPending ? "disabled" : ""}`}>
-              {upload.isPending ? <LoaderCircle className="spin" size={13} /> : <Upload size={13} />}
-              补充文件
-              <input
-                type="file"
-                disabled={upload.isPending}
-                onChange={(event) => {
-                  const file = event.target.files?.[0];
-                  if (file) upload.mutate(file);
-                  event.target.value = "";
-                }}
-              />
-            </label>
+            <div className="material-add-actions">
+              <button className="material-upload" onClick={() => setAddTextMaterialOpen(true)}>
+                <MessageSquareText size={13} />添加需求描述
+              </button>
+              <label className={`material-upload ${upload.isPending ? "disabled" : ""}`}>
+                {upload.isPending ? <LoaderCircle className="spin" size={13} /> : <Upload size={13} />}
+                上传文件
+                <input
+                  type="file"
+                  disabled={upload.isPending}
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    if (file) upload.mutate(file);
+                    event.target.value = "";
+                  }}
+                />
+              </label>
+            </div>
             {busy && (
               <span className="context-help">
-                运行中上传会立即通知 Codex 阅读新材料。
+                运行中新增材料会立即通知 Codex 阅读。
               </span>
             )}
+          </ContextGroup>
+          <ContextGroup title="验收标准">
+            {task.acceptanceCriteria ? (
+              <p className="acceptance-context-copy">{task.acceptanceCriteria}</p>
+            ) : (
+              <SmallEmpty>暂未设置，将依据需求材料判断完成情况。</SmallEmpty>
+            )}
+            <button className="material-upload acceptance-edit-button" onClick={() => setEditAcceptanceOpen(true)}>
+              <Pencil size={13} />{task.acceptanceCriteria ? "编辑验收标准" : "添加验收标准"}
+            </button>
           </ContextGroup>
           <ContextGroup title="代码仓库" count={task.repositories.length}>
             {task.repositories.map((repo) => (
@@ -604,88 +628,71 @@ function TaskDetail({
               <span className="context-help">计划修订和开发返工会尽量复用原 Agent 会话。</span>
             </ContextGroup>
           )}
+          <TaskOrganizer task={task} onChanged={onChanged} notify={notify} />
         </section>
 
-        <section className="timeline-panel">
-          <div className="tabs">
-            <button className={tab === "timeline" ? "active" : ""} onClick={() => setTab("timeline")}>
-              运行时间线
-            </button>
-            <button className={`${tab === "workbench" ? "active" : ""} ${pending.length > 0 && tab !== "workbench" ? "needs-attention" : ""}`} onClick={() => setTab("workbench")}>
-              开发工作台{pending.length > 0 && <b className="tab-attention-count">{pending.length}</b>}
-            </button>
-          </div>
-          {tab === "timeline" && (
-            <Timeline
-              events={events}
-              activities={task.activities}
-              interactions={task.interactions}
-              sessions={task.sessions}
-              onOpenWorkbench={() => setTab("workbench")}
-              onPreviewMaterial={(materialId) => setPreviewMaterialId(materialId)}
-              running={busy}
-              hasMore={eventsHasMore}
-              loading={eventsLoading}
-              onLoadOlder={onLoadOlder}
-            />
-          )}
-          {tab === "workbench" && (
-            <div className="development-workbench">
-              {pending.length > 0 && (
-                <section className="workbench-attention-stack">
-                  <header><span><AlertTriangle size={15} /><strong>需要你处理</strong></span><b>{pending.length}</b></header>
-                  <p>Agent 正在等待回答或授权。完成下面的操作后，本轮工作会自动继续。</p>
-                  {pending.map((interaction) => <InteractionCard key={interaction.id} interaction={interaction} onChanged={onChanged} />)}
-                </section>
-              )}
-              {busy && (
-                <div className={`prompt-pane workbench-composer ${busy ? "is-running" : "is-ready"}`}>
+        <section className="timeline-panel unified-timeline-panel">
+          <header className="timeline-panel-heading">
+            <div><Activity size={16} /><span><strong>运行时间线</strong><small>操作、确认与执行记录集中在这里</small></span></div>
+            <button className="secondary-button" onClick={() => setCodeChangesOpen(true)}><GitCompare size={14} />查看代码变更</button>
+          </header>
+          <div className={`timeline-command-center ${pending.length ? "needs-attention" : ""}`}>
+            {pending.length > 0 && (
+              <section className="timeline-confirmation-stack">
+                <header><span><AlertTriangle size={15} /><strong>需要你处理</strong></span><b>{pending.length}</b></header>
+                <p>Agent 正在等待回答或授权。完成下面的操作后，本轮工作会自动继续。</p>
+                {pending.map((interaction) => <InteractionCard key={interaction.id} interaction={interaction} onChanged={onChanged} />)}
+              </section>
+            )}
+            {busy && (
+              <details
+                className="timeline-composer-disclosure"
+                open={composerOpen}
+                onToggle={(event) => setComposerOpen(event.currentTarget.open)}
+              >
+                <summary>
+                  <span><MessageSquareText size={14} /><strong>补充当前 Agent 要求</strong></span>
+                  <small>{pending.length ? "Agent 正在等待你的输入" : "按需展开"}</small>
+                  <ChevronRight size={15} />
+                </summary>
+                <div className="prompt-pane timeline-composer">
                   <div className="composer-heading">
-                    <label htmlFor="run-prompt">补充当前 Agent 要求</label>
-                    {busy && task.provider === "codex" ? <span>实时介入</span> : <span>立即可操作</span>}
+                    <label htmlFor="run-prompt">追加指令</label>
+                    {task.provider === "codex" ? <span>实时介入</span> : <span>本轮结束后可用</span>}
                   </div>
                   <p className="composer-description">补充内容会发送给当前 Agent，不会启动新的动作。</p>
                   <textarea
                     id="run-prompt"
                     value={prompt}
                     onChange={(event) => setPrompt(event.target.value)}
-                    rows={3}
-                    placeholder={
-                      busy
-                        ? "例如：先不要做乘除法，只保留加减法；请优先补充测试。"
-                        : "描述本轮要新增、修改或修复的内容，以及完成标准"
-                    }
+                    rows={2}
+                    placeholder="例如：请优先补充异常状态测试，并保留现有接口兼容。"
                   />
                   <div className="composer-actions">
-                    <button
-                      className="primary-button"
-                      disabled={
-                        followUp.isPending ||
-                        !prompt.trim() ||
-                        (busy && task.provider !== "codex")
-                      }
-                      onClick={() => {
-                        followUp.mutate();
-                      }}
-                    >
-                      {followUp.isPending ? (
-                        <LoaderCircle className="spin" size={16} />
-                      ) : busy ? (
-                        <Send size={16} />
-                      ) : (
-                        <Play size={16} />
-                      )}
+                    <button className="primary-button" disabled={followUp.isPending || !prompt.trim() || task.provider !== "codex"} onClick={() => followUp.mutate()}>
+                      {followUp.isPending ? <LoaderCircle className="spin" size={16} /> : <Send size={16} />}
                       发送给当前 Agent
                     </button>
                   </div>
-                  {busy && task.provider !== "codex" && (
-                    <span className="form-hint">当前 Agent 暂不支持运行中介入，请等待本轮结束。</span>
-                  )}
+                  {task.provider !== "codex" && <span className="form-hint">当前 Agent 暂不支持运行中介入，请等待本轮结束。</span>}
                 </div>
-              )}
-              <ActionPanel task={task} busy={busy} onChanged={onChanged} notify={notify} />
-            </div>
-          )}
+              </details>
+            )}
+            {!busy && <TimelineActionPanel task={task} onChanged={onChanged} notify={notify} />}
+          </div>
+          <Timeline
+            events={events}
+            activities={task.activities}
+            artifacts={task.artifacts}
+            snapshots={task.snapshots}
+            interactions={task.interactions}
+            sessions={task.sessions}
+            onPreviewMaterial={(materialId) => setPreviewMaterialId(materialId)}
+            running={busy}
+            hasMore={eventsHasMore}
+            loading={eventsLoading}
+            onLoadOlder={onLoadOlder}
+          />
         </section>
 
       </div>
@@ -695,6 +702,23 @@ function TaskDetail({
           onClose={() => setPreviewMaterialId(undefined)}
         />
       )}
+      {addTextMaterialOpen && (
+        <AddTextMaterialDialog
+          task={task}
+          onClose={() => setAddTextMaterialOpen(false)}
+          onChanged={onChanged}
+          notify={notify}
+        />
+      )}
+      {editAcceptanceOpen && (
+        <AcceptanceCriteriaDialog
+          task={task}
+          onClose={() => setEditAcceptanceOpen(false)}
+          onChanged={onChanged}
+          notify={notify}
+        />
+      )}
+      {codeChangesOpen && <CodeChangesDialog taskId={task.id} onClose={() => setCodeChangesOpen(false)} />}
       {addRepositoryOpen && (
         <AddTaskRepositoryDialog
           task={task}
@@ -738,21 +762,27 @@ function TaskOrganizer({ task, onChanged, notify }: { task: Task; onChanged(): v
     },
   });
   return (
-    <ContextGroup title="任务归纳">
-      <div className="source-badge"><span>来源</span><strong>{task.source.label}</strong>{task.source.externalId && <code>{task.source.externalId}</code>}</div>
-      <label className="organizer-field"><span><Tags size={12} />标签</span><input value={tagsText} onChange={(event) => setTagsText(event.target.value)} placeholder="例如：计算器, 前端（逗号分隔）" /></label>
-      <label className="organizer-field"><span><Folder size={12} />收纳</span><select value={collectionId} onChange={(event) => setCollectionId(event.target.value)}><option value="">未收纳</option>{collections.data?.map((collection) => <option value={collection.id} key={collection.id}>{collection.name}</option>)}</select></label>
-      <div className="collection-create"><input value={newCollection} onChange={(event) => setNewCollection(event.target.value)} placeholder="新建收纳名称" /><button className="icon-button" aria-label="新建收纳" disabled={!newCollection.trim() || createCollection.isPending} onClick={() => createCollection.mutate()}><Plus size={13} /></button></div>
-      <button className="secondary-button organizer-save" disabled={save.isPending} onClick={() => save.mutate()}><Check size={13} />保存归纳</button>
-      {(save.error || createCollection.error) && <ErrorBanner error={save.error || createCollection.error} />}
-    </ContextGroup>
+    <details className="context-group organizer-disclosure">
+      <summary>
+        <span><Folder size={14} />任务归纳</span>
+        <small>标签与收纳</small>
+        <ChevronRight size={15} />
+      </summary>
+      <div className="organizer-content">
+        <div className="source-badge"><span>来源</span><strong>{task.source.label}</strong>{task.source.externalId && <code>{task.source.externalId}</code>}</div>
+        <label className="organizer-field"><span><Tags size={12} />标签</span><input value={tagsText} onChange={(event) => setTagsText(event.target.value)} placeholder="例如：计算器, 前端（逗号分隔）" /></label>
+        <label className="organizer-field"><span><Folder size={12} />收纳</span><select value={collectionId} onChange={(event) => setCollectionId(event.target.value)}><option value="">未收纳</option>{collections.data?.map((collection) => <option value={collection.id} key={collection.id}>{collection.name}</option>)}</select></label>
+        <div className="collection-create"><input value={newCollection} onChange={(event) => setNewCollection(event.target.value)} placeholder="新建收纳名称" /><button className="icon-button" aria-label="新建收纳" disabled={!newCollection.trim() || createCollection.isPending} onClick={() => createCollection.mutate()}><Plus size={13} /></button></div>
+        <button className="secondary-button organizer-save" disabled={save.isPending} onClick={() => save.mutate()}><Check size={13} />保存归纳</button>
+        {(save.error || createCollection.error) && <ErrorBanner error={save.error || createCollection.error} />}
+      </div>
+    </details>
   );
 }
 
-function ActionPanel({ task, busy, onChanged, notify }: { task: Task; busy: boolean; onChanged(): void; notify(message: string): void }) {
+function TimelineActionPanel({ task, onChanged, notify }: { task: Task; onChanged(): void; notify(message: string): void }) {
   const [instruction, setInstruction] = useState("");
   const available = useQuery({ queryKey: ["available-actions", task.id, task.updatedAt], queryFn: () => api.availableActions(task.id) });
-  const diff = useQuery({ queryKey: ["task-diff", task.id], queryFn: () => api.diff(task.id), enabled: false });
   const execute = useMutation({
     mutationFn: (type: TaskAction) => api.executeAction(task.id, { type, instruction: instruction.trim() || undefined, feedback: instruction.trim() || undefined }),
     onSuccess: (_result, type) => {
@@ -762,51 +792,51 @@ function ActionPanel({ task, busy, onChanged, notify }: { task: Task; busy: bool
       onChanged();
     },
   });
-  const latestSnapshot = task.snapshots.at(-1);
   const needsInstruction = available.data?.some((action) => action.requiresInstruction);
-  return <div className="action-panel">
+  return <section className="timeline-action-panel">
     <header className="action-heading">
-      <div><Workflow size={17} /><span><strong>下一步</strong><small>根据当前结果自由选择，不受固定模板约束</small></span></div>
-      <button className="secondary-button" onClick={() => void diff.refetch()} disabled={diff.isFetching}>{diff.isFetching ? <LoaderCircle className="spin" size={14} /> : <GitCompare size={14} />}查看代码 Diff</button>
+      <div><Workflow size={17} /><span><strong>下一步</strong><small>根据当前结果动态提供可执行操作</small></span></div>
     </header>
-    {(task.deliveryTarget || task.acceptanceCriteria) && <section className="acceptance-criteria">
+    {task.deliveryTarget && <section className="acceptance-criteria">
       {task.deliveryTarget && <><strong>交付目标</strong><p>{task.deliveryTarget}</p></>}
-      {task.acceptanceCriteria && <><strong>验收标准</strong><p>{task.acceptanceCriteria}</p></>}
     </section>}
     {needsInstruction && <textarea value={instruction} onChange={(event) => setInstruction(event.target.value)} rows={3} placeholder="填写计划修改意见、打回原因或知识修订意见；直接开发等动作可留空" />}
     <div className="action-grid">
       {available.isLoading && <SmallEmpty>正在计算可执行动作…</SmallEmpty>}
-      {available.data?.map((action) => <button disabled={busy || execute.isPending || Boolean(action.requiresInstruction && !instruction.trim())} key={action.type} onClick={() => execute.mutate(action.type)}>
+      {available.data?.map((action) => <button disabled={execute.isPending || Boolean(action.requiresInstruction && !instruction.trim())} key={action.type} onClick={() => execute.mutate(action.type)}>
         <strong>{action.label}</strong><span>{action.description}</span>
       </button>)}
     </div>
     {(available.error || execute.error) && <ErrorBanner error={available.error || execute.error} />}
-    {latestSnapshot && <section className="requirement-document">
-      <header><span><GitBranch size={14} /><strong>最近代码快照</strong></span><span>{formatTime(latestSnapshot.createdAt)}</span></header>
-      <pre>{latestSnapshot.repositories.map((repo) => `${shortPath(repo.path)}\nHEAD ${repo.head}\nTree ${repo.treeHash}\nDiff ${repo.diffHash}`).join("\n\n")}</pre>
-    </section>}
-    <section className="evidence-workbench">
-      <h3>产物与证据<span>{task.artifacts.length}</span></h3>
-      {!task.artifacts.length && <SmallEmpty>计划、审查报告、验收证据、交付记录与知识建议会显示在这里。</SmallEmpty>}
-      {[...task.artifacts].reverse().map((artifact) => <details className={`evidence-card ${artifact.kind}`} key={artifact.id}>
-        <summary><FileText size={13} /><strong>{artifact.title}</strong><time>{formatTime(artifact.createdAt)}</time></summary>
-        {artifact.content && <pre>{artifact.content}</pre>}
-        {Object.keys(artifact.metadata).length > 0 && <details className="evidence-metadata"><summary>结构化信息</summary><pre>{JSON.stringify(artifact.metadata, null, 2)}</pre></details>}
-      </details>)}
-    </section>
-    {(diff.data || diff.error) && <section className="diff-workbench">
-      <h3>代码与知识变更</h3>{diff.error && <ErrorBanner error={diff.error} />}
-      {diff.data?.map((repo) => <div className="repo-diff" key={repo.path}>
-        <header><span><GitBranch size={13} /><strong>{shortPath(repo.path)}</strong></span><span>{repo.files.length} 个文件 <b className="diff-additions">+{repo.additions}</b><b className="diff-deletions">−{repo.deletions}</b></span></header>
-        {!repo.files.length && <SmallEmpty>当前没有未提交的代码或知识变更。</SmallEmpty>}
-        {repo.files.map((file, index) => <DiffFileCard file={file} key={`${file.path}-${index}`} defaultOpen={repo.files.length <= 5} />)}
-      </div>)}
-    </section>}
-  </div>;
+  </section>;
+}
+
+function CodeChangesDialog({ taskId, onClose }: { taskId: string; onClose(): void }) {
+  const diff = useQuery({ queryKey: ["task-diff", taskId], queryFn: () => api.diff(taskId) });
+  return (
+    <div className="dialog-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <section className="dialog code-changes-dialog" role="dialog" aria-modal="true" aria-label="代码变更">
+        <header>
+          <div><span className="dialog-icon"><GitCompare size={18} /></span><div><h2>代码变更</h2><p>按文件查看当前任务相对于基线的 Git Diff</p></div></div>
+          <button className="icon-button" onClick={onClose} aria-label="关闭代码变更"><X size={17} /></button>
+        </header>
+        <div className="dialog-body code-changes-body">
+          {diff.isLoading && <div className="timeline-loading"><LoaderCircle className="spin" size={15} />正在读取代码变更</div>}
+          {diff.error && <ErrorBanner error={diff.error} />}
+          {diff.data?.map((repo) => <div className="repo-diff" key={repo.path}>
+            <header><span><GitBranch size={13} /><strong>{shortPath(repo.path)}</strong></span><span>{repo.files.length} 个文件 <b className="diff-additions">+{repo.additions}</b><b className="diff-deletions">−{repo.deletions}</b></span></header>
+            {!repo.files.length && <SmallEmpty>当前没有代码或知识变更。</SmallEmpty>}
+            {repo.files.map((file, index) => <DiffFileCard file={file} key={`${file.path}-${index}`} defaultOpen={repo.files.length <= 5} />)}
+          </div>)}
+          {diff.data?.length === 0 && <SmallEmpty>当前任务没有可查看的代码仓库。</SmallEmpty>}
+        </div>
+      </section>
+    </div>
+  );
 }
 
 const actionLabels: Partial<Record<TaskAction, string>> = {
-  generate_plan: "生成计划", revise_plan: "更新计划", accept_plan: "采纳计划", start_development: "开始开发",
+  generate_plan: "生成计划", revise_plan: "更新计划", accept_plan: "采纳计划并开始开发", start_development: "开始开发",
   request_changes: "打回修改", run_code_review: "代码审查", run_acceptance: "试运行与验收",
   checkpoint_and_continue: "提交推送后继续修改", deliver: "提交并推送",
   generate_knowledge_proposal: "生成知识建议", revise_knowledge_proposal: "修订知识建议",
@@ -894,6 +924,127 @@ function MaterialPreview({ materialId, onClose }: { materialId: string; onClose(
   );
 }
 
+function AddTextMaterialDialog({
+  task,
+  onClose,
+  onChanged,
+  notify,
+}: {
+  task: Task;
+  onClose(): void;
+  onChanged(): void;
+  notify(message: string): void;
+}) {
+  const [content, setContent] = useState("");
+  const addMaterial = useMutation({
+    mutationFn: () => api.addTextMaterial(task.id, content),
+    onSuccess: ({ agentNotified }) => {
+      notify(agentNotified ? "补充说明已保存并通知当前 Agent" : "补充说明已保存");
+      onChanged();
+      onClose();
+    },
+  });
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    if (content.trim()) addMaterial.mutate();
+  };
+  return (
+    <div className="dialog-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <form className="dialog text-material-dialog" role="dialog" aria-modal="true" aria-label="添加需求描述" onSubmit={submit}>
+        <header>
+          <div>
+            <span className="dialog-icon"><MessageSquareText size={18} /></span>
+            <div>
+              <h2>添加需求描述</h2>
+              <p>补充需求背景、功能细节、限制条件或验收说明</p>
+            </div>
+          </div>
+          <button type="button" className="icon-button" onClick={onClose} aria-label="关闭"><X size={17} /></button>
+        </header>
+        <div className="dialog-body">
+          <textarea
+            autoFocus
+            value={content}
+            onChange={(event) => setContent(event.target.value)}
+            placeholder="输入补充说明……\n\n保存后会作为一项需求材料显示在左侧。"
+            maxLength={100_000}
+            rows={12}
+          />
+          <div className="text-material-meta">
+            <span>名称将取第一行的前几个字，方便快速识别</span>
+            <b>{content.length.toLocaleString()} / 100,000</b>
+          </div>
+          {addMaterial.error && <ErrorBanner error={addMaterial.error} />}
+        </div>
+        <footer>
+          <button type="button" className="secondary-button" onClick={onClose}>取消</button>
+          <button type="submit" className="primary-button" disabled={!content.trim() || addMaterial.isPending}>
+            {addMaterial.isPending ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />}
+            保存说明
+          </button>
+        </footer>
+      </form>
+    </div>
+  );
+}
+
+function AcceptanceCriteriaDialog({
+  task,
+  onClose,
+  onChanged,
+  notify,
+}: {
+  task: Task;
+  onClose(): void;
+  onChanged(): void;
+  notify(message: string): void;
+}) {
+  const [content, setContent] = useState(task.acceptanceCriteria ?? "");
+  const save = useMutation({
+    mutationFn: () => api.updateAcceptanceCriteria(task.id, content.trim() || null),
+    onSuccess: ({ agentNotified }) => {
+      notify(agentNotified ? "验收标准已更新并通知当前 Agent" : "验收标准已更新");
+      onChanged();
+      onClose();
+    },
+  });
+  const submit = (event: FormEvent) => {
+    event.preventDefault();
+    save.mutate();
+  };
+  return (
+    <div className="dialog-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+      <form className="dialog acceptance-dialog" role="dialog" aria-modal="true" aria-label="编辑验收标准" onSubmit={submit}>
+        <header>
+          <div>
+            <span className="dialog-icon"><CheckCircle2 size={18} /></span>
+            <div><h2>编辑验收标准</h2><p>明确可验证的完成条件，后续验收 Agent 将逐项检查</p></div>
+          </div>
+          <button type="button" className="icon-button" onClick={onClose} aria-label="关闭"><X size={17} /></button>
+        </header>
+        <div className="dialog-body">
+          <textarea
+            autoFocus
+            value={content}
+            onChange={(event) => setContent(event.target.value)}
+            placeholder={"例如：\n1. 核心流程可正常完成\n2. 自动化测试全部通过\n3. 异常状态有明确提示"}
+            maxLength={50_000}
+            rows={11}
+          />
+          <div className="text-material-meta"><span>支持随时修改；留空保存会清除单独设置的验收标准</span><b>{content.length.toLocaleString()} / 50,000</b></div>
+          {save.error && <ErrorBanner error={save.error} />}
+        </div>
+        <footer>
+          <button type="button" className="secondary-button" onClick={onClose}>取消</button>
+          <button type="submit" className="primary-button" disabled={save.isPending || content.trim() === (task.acceptanceCriteria ?? "").trim()}>
+            {save.isPending ? <LoaderCircle className="spin" size={14} /> : <Check size={14} />}保存验收标准
+          </button>
+        </footer>
+      </form>
+    </div>
+  );
+}
+
 function isTimelineEvent(event: AgentEvent) {
   if (
     [
@@ -931,16 +1082,36 @@ type TimelineRun = {
 
 type TimelineItem =
   | { kind: "activity"; key: string; createdAt: string; activity: TaskActivity }
+  | { kind: "artifact"; key: string; createdAt: string; artifact: ActionArtifact }
+  | { kind: "snapshot"; key: string; createdAt: string; snapshot: CodeSnapshot }
   | { kind: "event"; key: string; createdAt: string; event: AgentEvent }
   | { kind: "run"; key: string; createdAt: string; run: TimelineRun };
 
-function buildTimelineItems(events: AgentEvent[], activities: TaskActivity[], sessions: Task["sessions"]): TimelineItem[] {
+function buildTimelineItems(
+  events: AgentEvent[],
+  activities: TaskActivity[],
+  sessions: Task["sessions"],
+  artifacts: ActionArtifact[],
+  snapshots: CodeSnapshot[],
+): TimelineItem[] {
   const items: TimelineItem[] = activities.map((activity) => ({
     kind: "activity",
     key: `activity-${activity.id}`,
     createdAt: activity.createdAt,
     activity,
   }));
+  items.push(...artifacts.map((artifact) => ({
+    kind: "artifact" as const,
+    key: `artifact-${artifact.id}`,
+    createdAt: artifact.createdAt,
+    artifact,
+  })));
+  items.push(...snapshots.map((snapshot) => ({
+    kind: "snapshot" as const,
+    key: `snapshot-${snapshot.id}`,
+    createdAt: snapshot.createdAt,
+    snapshot,
+  })));
   let current: TimelineRun | undefined;
   const finishCurrent = () => {
     if (!current) return;
@@ -1023,9 +1194,10 @@ function buildTimelineItems(events: AgentEvent[], activities: TaskActivity[], se
 function Timeline({
   events,
   activities,
+  artifacts,
+  snapshots,
   interactions,
   sessions,
-  onOpenWorkbench,
   running,
   hasMore,
   loading,
@@ -1034,17 +1206,17 @@ function Timeline({
 }: {
   events: AgentEvent[];
   activities: TaskActivity[];
+  artifacts: ActionArtifact[];
+  snapshots: CodeSnapshot[];
   interactions: PendingInteraction[];
   sessions: Task["sessions"];
-  onOpenWorkbench(): void;
   running: boolean;
   hasMore: boolean;
   loading: boolean;
   onLoadOlder(): Promise<void>;
   onPreviewMaterial(materialId: string): void;
 }) {
-  const items = buildTimelineItems(events, activities, sessions);
-  const pendingInteractions = interactions.filter((interaction) => interaction.status === "pending");
+  const items = buildTimelineItems(events, activities, sessions, artifacts, snapshots);
   const [collapseAllVersion, setCollapseAllVersion] = useState(0);
   const runCount = items.filter((item) => item.kind === "run").length;
   if (!items.length && !loading) {
@@ -1069,19 +1241,13 @@ function Timeline({
           全部折叠
         </button>
       </div>
-      {pendingInteractions.length > 0 && <section className="timeline-attention-stack">
-        <header><span><AlertTriangle size={14} /><strong>Agent 正在等待你处理</strong></span><b>{pendingInteractions.length}</b></header>
-        <p>时间线仅记录待处理事项。请前往开发工作台回答问题或处理授权。</p>
-        <div className="timeline-pending-list">
-          {pendingInteractions.map((interaction) => <InteractionTimelineSummary key={interaction.id} interaction={interaction} />)}
-        </div>
-        <button className="secondary-button" onClick={onOpenWorkbench}>前往开发工作台处理</button>
-      </section>}
       {running && !items.some((item) => item.kind === "run" && item.run.status === "running") && (
         <div className="thinking-row"><LoaderCircle className="spin" size={15} />Agent 正在启动</div>
       )}
       {items.map((item) => {
         if (item.kind === "activity") return <ActivityTimelineEvent key={item.key} activity={item.activity} onPreviewMaterial={onPreviewMaterial} />;
+        if (item.kind === "artifact") return <ArtifactTimelineEvent key={item.key} artifact={item.artifact} />;
+        if (item.kind === "snapshot") return <SnapshotTimelineEvent key={item.key} snapshot={item.snapshot} />;
         if (item.kind === "run") return <AgentRunCard key={item.key} run={item.run} interactions={interactions} collapseAllVersion={collapseAllVersion} onPreviewMaterial={onPreviewMaterial} />;
         return <TimelineEvent key={item.key} event={item.event} />;
       })}
@@ -1092,6 +1258,58 @@ function Timeline({
         </button>
       )}
     </div>
+  );
+}
+
+const artifactKindLabels: Record<ActionArtifact["kind"], string> = {
+  plan: "开发计划",
+  development: "开发结果",
+  review: "代码审查",
+  acceptance: "验收证据",
+  delivery: "交付记录",
+  knowledge: "知识建议",
+  knowledge_retrieval: "关联知识",
+  feedback: "修改意见",
+  test: "测试结果",
+};
+
+function ArtifactTimelineEvent({ artifact }: { artifact: ActionArtifact }) {
+  const icon = artifact.kind === "plan" ? <Workflow size={14} />
+    : artifact.kind === "review" || artifact.kind === "acceptance" ? <CheckCircle2 size={14} />
+      : artifact.kind === "knowledge" || artifact.kind === "knowledge_retrieval" ? <BookOpen size={14} />
+        : artifact.kind === "feedback" ? <RefreshCw size={14} /> : <FileText size={14} />;
+  return (
+    <article className="timeline-event artifact-timeline-event agent">
+      <div className="event-rail"><span>{icon}</span></div>
+      <div className="event-body">
+        <details className={`timeline-artifact-card ${artifact.kind}`}>
+          <summary>
+            <span className="artifact-kind-badge">{artifactKindLabels[artifact.kind]}</span>
+            <strong>{artifact.title}</strong>
+            <time>{formatTime(artifact.createdAt)}</time>
+            <ChevronRight size={14} />
+          </summary>
+          {artifact.content ? <div className="timeline-artifact-content"><MarkdownContent content={artifact.content} /></div> : <SmallEmpty>该产物没有文本内容。</SmallEmpty>}
+          {Object.keys(artifact.metadata).length > 0 && (
+            <details className="evidence-metadata"><summary>结构化信息</summary><pre>{JSON.stringify(artifact.metadata, null, 2)}</pre></details>
+          )}
+        </details>
+      </div>
+    </article>
+  );
+}
+
+function SnapshotTimelineEvent({ snapshot }: { snapshot: CodeSnapshot }) {
+  return (
+    <article className="timeline-event snapshot-timeline-event file">
+      <div className="event-rail"><span><GitBranch size={14} /></span></div>
+      <div className="event-body">
+        <details className="timeline-artifact-card snapshot">
+          <summary><span className="artifact-kind-badge">代码快照</span><strong>记录代码状态</strong><time>{formatTime(snapshot.createdAt)}</time><ChevronRight size={14} /></summary>
+          <pre>{snapshot.repositories.map((repo) => `${shortPath(repo.path)}\nHEAD ${repo.head}\nTree ${repo.treeHash}\nDiff ${repo.diffHash}`).join("\n\n")}</pre>
+        </details>
+      </div>
+    </article>
   );
 }
 
@@ -1106,7 +1324,7 @@ function ActivityTimelineEvent({ activity, onPreviewMaterial }: { activity: Task
     : activity.type === "action.interrupted"
       ? { icon: <CircleStop size={14} />, title: "动作已中断", text: "执行现场已保留，可重新选择下一步", tone: "warning" }
     : activity.type === "plan.accepted"
-      ? { icon: <CheckCircle2 size={14} />, title: "计划已采纳", text: "现在可以开始开发，也可以继续调整计划", tone: "success" }
+      ? { icon: <CheckCircle2 size={14} />, title: "计划已采纳", text: "系统已自动进入开发，无需再次确认", tone: "success" }
     : activity.type === "knowledge.accepted"
       ? { icon: <CheckCircle2 size={14} />, title: "知识库已更新", text: String(activity.payload.summary ?? "知识建议已经应用"), tone: "success" }
     : activity.type === "knowledge.rejected"
@@ -1133,6 +1351,8 @@ function ActivityTimelineEvent({ activity, onPreviewMaterial }: { activity: Task
         ? { icon: <RefreshCw size={14} />, title: activity.payload.automatic ? "验收未通过，已自动打回" : "审核打回修改", text: activity.payload.automatic ? String(activity.payload.feedback ?? "已自动要求修改").split("\n")[0] : String(activity.payload.feedback ?? "已要求修改"), tone: "warning" }
         : activity.type === "repository.added"
             ? { icon: <FolderGit2 size={14} />, title: "关联新的代码仓库", text: `${String(activity.payload.sourcePath ?? "")}${activity.payload.taskBranch ? `\n任务分支：${String(activity.payload.taskBranch)}` : ""}`, tone: "file" }
+          : activity.type === "acceptance.updated"
+            ? { icon: <CheckCircle2 size={14} />, title: activity.payload.cleared ? "清除验收标准" : "更新验收标准", text: activity.payload.cleared ? "后续将依据需求材料判断完成情况" : String(activity.payload.acceptanceCriteria ?? ""), tone: "file" }
           : activity.type === "material.removed"
     ? { icon: <Trash2 size={14} />, title: "移除需求材料", text: name, tone: "danger" }
     : activity.type === "material.added"
@@ -1216,7 +1436,7 @@ function AgentRunCard({
       </button>
       {expanded && (
         <div className="agent-run-details">
-          {pendingInteractions > 0 && <div className="run-attention"><MessageSquareText size={14} /><span><strong>本轮正在等待你的回答或授权</strong><small>请前往开发工作台处理；时间线仅保留过程记录。</small></span></div>}
+          {pendingInteractions > 0 && <div className="run-attention"><MessageSquareText size={14} /><span><strong>本轮正在等待你的回答或授权</strong><small>请在时间线顶部的确认框中处理。</small></span></div>}
           {prompt && <div className="run-prompt"><strong>本轮指令</strong><p>{prompt}</p></div>}
           {materials.length > 0 && (
             <div className="run-materials">
@@ -1233,70 +1453,37 @@ function AgentRunCard({
   );
 }
 
-function LegacyTimeline({
-  events,
-  running,
-  hasMore,
-  loading,
-  onLoadOlder,
-}: {
-  events: AgentEvent[];
-  running: boolean;
-  hasMore: boolean;
-  loading: boolean;
-  onLoadOlder(): Promise<void>;
-}) {
-  const visibleEvents = events.reduce<AgentEvent[]>((result, event) => {
-    const item = event.payload.item as Record<string, unknown> | undefined;
-    if (event.type === "message.completed" && !String(item?.text ?? "").trim()) {
-      return result;
-    }
-    if (event.type === "interaction.resolved" && !event.payload.action && !event.payload.resolution) {
-      return result;
-    }
-    const previous = result.at(-1);
-    if (event.type === "command.completed" && previous?.type === "command.started") {
-      const previousItem = previous.payload.item as Record<string, unknown> | undefined;
-      if (previousItem?.id === item?.id) result.pop();
-    }
-    result.push(event);
-    return result;
-  }, []);
-
-  if (!visibleEvents.length && !loading) {
-    return (
-      <div className="timeline-empty">
-        <Sparkles size={28} />
-        <strong>准备好开始一次开发任务</strong>
-        <span>准备工作区后，在“开发工作台”中启动 Agent</span>
-      </div>
-    );
+function MarkdownContent({ content }: { content: string }) {
+  const blocks: Array<{ type: "text" | "code"; content: string; language?: string }> = [];
+  const fence = /```([^\r\n`]*)\r?\n([\s\S]*?)```/g;
+  let cursor = 0;
+  for (const match of content.matchAll(fence)) {
+    const index = match.index ?? 0;
+    if (index > cursor) blocks.push({ type: "text", content: content.slice(cursor, index) });
+    blocks.push({ type: "code", language: match[1]?.trim(), content: match[2]?.replace(/\r?\n$/, "") ?? "" });
+    cursor = index + match[0].length;
   }
+  if (cursor < content.length) blocks.push({ type: "text", content: content.slice(cursor) });
+  if (!blocks.length) blocks.push({ type: "text", content });
   return (
-    <div className="timeline">
-      {hasMore && (
-        <button
-          className="load-more-button"
-          disabled={loading}
-          onClick={() => void onLoadOlder()}
-        >
-          {loading ? <LoaderCircle className="spin" size={14} /> : <Clock3 size={14} />}
-          加载更早记录
-        </button>
-      )}
-      {loading && !events.length && (
-        <div className="timeline-loading">
-          <LoaderCircle className="spin" size={16} /> 正在加载时间线
+    <div className="markdown-content">
+      {blocks.map((block, index) => block.type === "code" ? (
+        <div className="markdown-code-block" key={index}>
+          {block.language && <div className="markdown-code-language">{block.language}</div>}
+          <pre><code>{block.content}</code></pre>
         </div>
-      )}
-      {visibleEvents.map((event) => <TimelineEvent key={event.id} event={event} />)}
-      {running && (
-        <div className="thinking-row">
-          <LoaderCircle className="spin" size={15} />
-          Agent 正在工作
-        </div>
-      )}
+      ) : block.content.trim() ? (
+        <p key={index}>{renderInlineCode(block.content.trim())}</p>
+      ) : null)}
     </div>
+  );
+}
+
+function renderInlineCode(content: string) {
+  return content.split(/(`[^`\r\n]+`)/g).map((part, index) =>
+    part.startsWith("`") && part.endsWith("`")
+      ? <code className="markdown-inline-code" key={index}>{part.slice(1, -1)}</code>
+      : part,
   );
 }
 
@@ -1368,7 +1555,7 @@ function TimelineEvent({ event }: { event: AgentEvent }) {
       <div className="event-rail"><span>{config.icon}</span></div>
       <div className="event-body">
         <header><strong>{config.title}</strong><time>{formatTime(event.createdAt)}</time></header>
-        <p className="event-summary">{content}</p>
+        {event.type === "message.completed" ? <MarkdownContent content={content} /> : <p className="event-summary">{content}</p>}
         {event.type === "interaction.resolved" && resolution?.details.length ? (
           <dl className="interaction-resolution-details">
             {resolution.details.map((detail, index) => (
@@ -1611,20 +1798,6 @@ function InteractionCard({
       </details>
       {mutation.error && <span className="inline-error">{mutation.error.message}</span>}
     </div>
-  );
-}
-
-function InteractionTimelineSummary({ interaction }: { interaction: PendingInteraction }) {
-  const payload = interaction.payload as Record<string, unknown>;
-  const questions = Array.isArray(payload.questions) ? payload.questions as Record<string, unknown>[] : [];
-  const title = interaction.type === "user_question"
-    ? String(questions[0]?.question ?? payload.question ?? "Agent 需要补充信息")
-    : interaction.presentation?.title ?? String(payload.title ?? payload.toolName ?? "Agent 申请执行权限");
-  return (
-    <article className="timeline-pending-summary">
-      {interaction.type === "user_question" ? <MessageSquareText size={13} /> : <AlertTriangle size={13} />}
-      <span><strong>{interaction.type === "user_question" ? "Agent 提问" : "权限申请"}</strong><small>{title}</small></span>
-    </article>
   );
 }
 

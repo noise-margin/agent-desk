@@ -58,6 +58,11 @@ export const api = {
       method: "PATCH",
       body: JSON.stringify(input),
     }),
+  updateAcceptanceCriteria: (id: string, acceptanceCriteria: string | null) =>
+    request<{ task: Task; agentNotified: boolean }>(`/api/tasks/${id}/acceptance-criteria`, {
+      method: "PATCH",
+      body: JSON.stringify({ acceptanceCriteria }),
+    }),
   createTask: (input: CreateTaskInput) =>
     request<Task>("/api/tasks", {
       method: "POST",
@@ -68,6 +73,11 @@ export const api = {
     body.append("file", file);
     return request<Material>(`/api/tasks/${taskId}/materials`, { method: "POST", body });
   },
+  addTextMaterial: (taskId: string, content: string) =>
+    request<{ material: Material; agentNotified: boolean }>(`/api/tasks/${taskId}/materials/text`, {
+      method: "POST",
+      body: JSON.stringify({ content }),
+    }),
   materialContent: (materialId: string) =>
     request<{ material: Material; content: string; truncated: boolean }>(
       `/api/materials/${materialId}/content`,

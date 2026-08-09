@@ -484,6 +484,15 @@ export class Store {
     }
   }
 
+  updateAcceptanceCriteria(id: string, acceptanceCriteria?: string) {
+    const updatedAt = now();
+    const result = this.db
+      .prepare("UPDATE tasks SET acceptance_criteria = ?, updated_at = ? WHERE id = ?")
+      .run(acceptanceCriteria?.trim() || null, updatedAt, id);
+    if (!result.changes) throw new Error("任务不存在");
+    return this.getTask(id)!;
+  }
+
   listCollections(): TaskCollection[] {
     const rows = this.db.prepare("SELECT * FROM task_collections ORDER BY name COLLATE NOCASE").all() as Record<string, unknown>[];
     return rows.map(mapCollection);

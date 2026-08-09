@@ -43,6 +43,36 @@ describe("ActionEngine", () => {
     store.close();
   });
 
+  it("only offers plan confirmation after planning and starts development immediately when accepted", async () => {
+    const { store, engine, start } = setup();
+    const task = store.createTask({ title: "accept and develop", provider: "codex", repositories: [] });
+    const planning = store.createAction(task.id, "generate_plan");
+    store.updateAction(planning.id, { status: "succeeded", completedAt: new Date().toISOString() });
+    const plan = store.addArtifact(task.id, planning.id, {
+      kind: "plan",
+      title: "开发计划",
+      content: "先实现核心逻辑，再补充测试。",
+      metadata: { status: "draft" },
+    });
+
+    expect(engine.availableActions(task.id).map((action) => action.type)).toEqual(["revise_plan", "accept_plan"]);
+
+    await engine.execute(task.id, { type: "accept_plan", artifactId: plan.id });
+
+    const updated = store.getTask(task.id)!;
+    expect(updated.artifacts.find((artifact) => artifact.id === plan.id)?.metadata.status).toBe("accepted");
+    expect(updated.actions.slice(-2).map((action) => [action.type, action.status])).toEqual([
+      ["accept_plan", "succeeded"],
+      ["start_development", "running"],
+    ]);
+    expect(start).toHaveBeenLastCalledWith(task.id, expect.objectContaining({
+      mode: "development",
+      prompt: expect.stringContaining("先实现核心逻辑，再补充测试。"),
+    }));
+    expect(engine.availableActions(task.id)).toEqual([]);
+    store.close();
+  });
+
   it("offers review, acceptance, direct rework, checkpoint and final delivery after development", () => {
     const { store, engine } = setup();
     const task = store.createTask({ title: "review choices", provider: "codex", repositories: [] });

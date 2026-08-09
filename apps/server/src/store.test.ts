@@ -77,6 +77,10 @@ describe("Store", () => {
     expect(organized.collection).toEqual(collection);
     expect(store.listCollections()).toEqual([collection]);
 
+    expect(store.updateAcceptanceCriteria(task.id, "自动化测试通过\n关键路径可复现").acceptanceCriteria)
+      .toBe("自动化测试通过\n关键路径可复现");
+    expect(store.updateAcceptanceCriteria(task.id).acceptanceCriteria).toBeUndefined();
+
     const registered = store.createRegisteredRepository({
       name: "Order Service",
       sourcePath: "E:/code/order",

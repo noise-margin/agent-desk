@@ -89,7 +89,7 @@ const labels: Record<TaskAction, Omit<AvailableAction, "type">> = {
   retrieve_knowledge: { label: "检索关联知识", description: "搜索关联知识库并生成可追踪的知识概览。" },
   generate_plan: { label: "生成开发计划", description: "让 Coding Agent 先分析需求并生成可确认的计划。" },
   revise_plan: { label: "要求更新计划", description: "根据你的意见修改当前计划。", requiresInstruction: true },
-  accept_plan: { label: "采纳计划", description: "把当前计划作为后续开发上下文。", tone: "primary" },
+  accept_plan: { label: "采纳计划", description: "确认当前计划并立即进入开发。", tone: "primary" },
   start_development: { label: "开始开发", description: "直接开发，或依据已经采纳的计划实施。", tone: "primary" },
   request_changes: { label: "直接打回修改", description: "不提交当前结果，恢复开发 Agent 修改。", requiresInstruction: true },
   run_code_review: { label: "Agent Code Review", description: "启动独立只读代码审查。" },
@@ -126,7 +126,7 @@ export class ActionEngine {
       const latestPlan = [...task.artifacts].reverse().find((artifact) => artifact.kind === "plan");
       if (!hasDevelopment) {
         types = latestPlan && latestPlan.metadata.status === "draft"
-          ? ["revise_plan", "accept_plan", "start_development"]
+          ? ["revise_plan", "accept_plan"]
           : ["generate_plan", "start_development"];
       } else {
         types = ["request_changes", "run_code_review", "run_acceptance", "checkpoint_and_continue", "deliver"];
@@ -223,7 +223,7 @@ export class ActionEngine {
     return this.startAgent(action, `${prompt}${this.knowledgeContextBlock(knowledgeContext)}`, "planning", "working");
   }
 
-  private acceptPlan(taskId: string, artifactId?: string) {
+  private async acceptPlan(taskId: string, artifactId?: string) {
     const task = this.requireTask(taskId);
     const artifact = artifactId ? task.artifacts.find((item) => item.id === artifactId) : [...task.artifacts].reverse().find((item) => item.kind === "plan");
     if (!artifact || artifact.kind !== "plan") throw new Error("没有可以采纳的计划");
@@ -232,7 +232,7 @@ export class ActionEngine {
     this.completeAction(action, { artifactId: artifact.id });
     this.store.updateTask(taskId, { status: "ready" });
     this.store.addActivity(taskId, "plan.accepted", { artifactId: artifact.id });
-    return this.requireTask(taskId);
+    return this.startDevelopment(taskId);
   }
 
   private async startDevelopment(taskId: string, instruction?: string, knowledgeContext = "") {
