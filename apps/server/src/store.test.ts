@@ -136,13 +136,11 @@ describe("Store", () => {
       title: "restart recovery",
       provider: "codex",
       repositories: [],
-      workflow: { templateId: "fast" },
     });
     const session = store.createSession(task.id, "codex");
     store.updateSession(session.id, { status: "waiting_user", providerSessionId: "thread-restart" });
-    const development = store.getWorkflow(task.id)!.nodes.find((node) => node.kind === "development")!;
-    store.updateWorkflowNode(task.id, development.id, { status: "running", sessionId: session.id, startedAt: new Date().toISOString() });
-    store.updateWorkflow(task.id, { status: "running", currentNodeId: development.id });
+    const action = store.createAction(task.id, "start_development");
+    store.updateAction(action.id, { status: "running", sessionId: session.id, startedAt: new Date().toISOString() });
     store.updateTask(task.id, { status: "waiting_user" });
     const interaction = store.createInteraction({
       taskId: task.id,
@@ -159,9 +157,8 @@ describe("Store", () => {
     expect(recoveredTask.status).toBe("interrupted");
     expect(recoveredTask.sessions.find((item) => item.id === session.id)?.status).toBe("interrupted");
     expect(recoveredTask.interactions.find((item) => item.id === interaction.id)?.status).toBe("stale");
-    expect(recoveredTask.workflow?.status).toBe("interrupted");
-    expect(recoveredTask.workflow?.nodes.find((node) => node.id === development.id)?.status).toBe("interrupted");
-    expect(recoveredTask.activities.at(-1)).toMatchObject({ type: "workflow.interrupted" });
+    expect(recoveredTask.actions.find((item) => item.id === action.id)?.status).toBe("interrupted");
+    expect(recoveredTask.activities.at(-1)).toMatchObject({ type: "action.interrupted" });
     reopened.close();
   });
 });

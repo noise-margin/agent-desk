@@ -2,7 +2,9 @@ import type {
   AgentEvent,
   AgentEventPage,
   AgentEventPageMode,
+  AvailableAction,
   CreateTaskInput,
+  ExecuteActionInput,
   HealthResponse,
   Material,
   RegisteredRepository,
@@ -11,8 +13,6 @@ import type {
   RepositoryDiff,
   Task,
   TaskCollection,
-  WorkflowRun,
-  WorkflowTemplate,
 } from "@agentdesk/protocol";
 
 const API = import.meta.env.VITE_API_BASE ?? "";
@@ -34,17 +34,8 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   health: () => request<HealthResponse>("/api/health"),
-  workflowTemplates: () => request<WorkflowTemplate[]>("/api/workflow-templates"),
-  configureWorkflow: (taskId: string, input: { templateId: string; acceptanceCriteria?: string }) =>
-    request<WorkflowRun>(`/api/tasks/${taskId}/workflow`, {
-      method: "POST",
-      body: JSON.stringify(input),
-    }),
-  replaceWorkflow: (taskId: string, input: { templateId: string; acceptanceCriteria?: string }) =>
-    request<WorkflowRun>(`/api/tasks/${taskId}/workflow`, {
-      method: "PUT",
-      body: JSON.stringify(input),
-    }),
+  availableActions: (taskId: string) => request<AvailableAction[]>(`/api/tasks/${taskId}/available-actions`),
+  executeAction: (taskId: string, input: ExecuteActionInput) => request<Task>(`/api/tasks/${taskId}/actions`, { method: "POST", body: JSON.stringify(input) }),
   tasks: () => request<Task[]>("/api/tasks"),
   collections: () => request<TaskCollection[]>("/api/task-collections"),
   registeredRepositories: () => request<RegisteredRepository[]>("/api/registered-repositories"),
@@ -91,11 +82,6 @@ export const api = {
     }),
   prepare: (taskId: string) =>
     request<Task>(`/api/tasks/${taskId}/prepare`, { method: "POST" }),
-  run: (taskId: string, prompt: string) =>
-    request(`/api/tasks/${taskId}/run`, {
-      method: "POST",
-      body: JSON.stringify({ prompt }),
-    }),
   followUp: (taskId: string, message: string, persist = true) =>
     request<{ mode: "steer" | "new_turn"; sessionId?: string }>(
       `/api/tasks/${taskId}/follow-ups`,
@@ -118,13 +104,6 @@ export const api = {
   },
   interrupt: (taskId: string) =>
     request(`/api/tasks/${taskId}/interrupt`, { method: "POST" }),
-  workflowDecision: (
-    taskId: string,
-    input: { action: "approve" | "request_changes" | "discard" | "retry" | "recover"; feedback?: string },
-  ) => request<WorkflowRun>(`/api/tasks/${taskId}/workflow-decision`, {
-    method: "POST",
-    body: JSON.stringify(input),
-  }),
   diff: (taskId: string) =>
     request<RepositoryDiff[]>(`/api/tasks/${taskId}/diff`),
   resolve: (interactionId: string, input: ResolveInteractionInput) =>

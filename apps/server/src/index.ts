@@ -10,7 +10,7 @@ import { Orchestrator } from "./orchestrator.js";
 import { registerRoutes } from "./routes.js";
 import { Store } from "./store.js";
 import { WorkspaceService } from "./workspace.js";
-import { WorkflowEngine } from "./workflow-engine.js";
+import { ActionEngine } from "./action-engine.js";
 
 fs.mkdirSync(config.dataDir, { recursive: true });
 fs.mkdirSync(config.workspacesDir, { recursive: true });
@@ -33,9 +33,9 @@ const store = new Store();
 const events = new EventBus(store);
 const workspace = new WorkspaceService(store);
 const orchestrator = new Orchestrator(store, events);
-const workflowEngine = new WorkflowEngine(store, events, orchestrator);
+const actionEngine = new ActionEngine(store, events, orchestrator);
 
-await registerRoutes(app, { store, events, workspace, orchestrator, workflowEngine });
+await registerRoutes(app, { store, events, workspace, orchestrator, actionEngine });
 
 const webDist = path.resolve(config.rootDir, "apps/web/dist");
 if (fs.existsSync(webDist)) {
@@ -63,19 +63,6 @@ app.setErrorHandler((error, _request, reply) => {
 });
 
 await app.listen({ host: config.host, port: config.port });
-
-try {
-  const recoveredInterruptedWorkflows = await workflowEngine.recoverInterruptedWorkflows();
-  const recoveredQualityReworks = await workflowEngine.recoverAutomaticQualityReworks();
-  if (recoveredInterruptedWorkflows > 0 || recoveredQualityReworks > 0) {
-    app.log.info(
-      { recoveredInterruptedWorkflows, recoveredQualityReworks },
-      "recovered interrupted workflows",
-    );
-  }
-} catch (error) {
-  app.log.error(error, "failed to recover workflows after startup");
-}
 
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
   process.once(signal, () => {

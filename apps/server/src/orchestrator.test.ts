@@ -30,7 +30,7 @@ describe("Orchestrator follow-up", () => {
       interrupt: async () => {},
     };
     const task = store.createTask({ title: "calculator", provider: "codex", repositories: [] });
-    store.updateTask(task.id, { workspacePath: dir, status: "completed" });
+    store.updateTask(task.id, { workspacePath: dir, status: "ready" });
     const session = store.createSession(task.id, "codex");
     store.updateSession(session.id, { providerSessionId: "thread-123", status: "completed" });
 

@@ -5,6 +5,10 @@ import type {
   AgentEventType,
   AgentProvider,
   AgentSession,
+  ActionArtifact,
+  ActionRun,
+  ActionRunStatus,
+  CodeSnapshot,
   CreateTaskInput,
   InteractionType,
   Material,
@@ -18,14 +22,9 @@ import type {
   TaskRepository,
   TaskRepositoryInput,
   TaskStatus,
-  WorkflowArtifact,
-  WorkflowNodeRun,
-  WorkflowNodeStatus,
-  WorkflowRun,
 } from "@agentdesk/protocol";
 import { randomUUID } from "node:crypto";
 import { config } from "./config.js";
-import { resolveWorkflowTemplate } from "./workflow-templates.js";
 import { buildInteractionPresentation } from "./interaction-presentation.js";
 
 function now() {
@@ -94,22 +93,12 @@ export class Store {
         .prepare("UPDATE sessions SET status = 'interrupted', updated_at = ? WHERE status IN ('starting','running','waiting_user')")
         .run(interruptedAt);
       const updateTask = this.db.prepare("UPDATE tasks SET status='interrupted', updated_at=? WHERE id=?");
-      const getWorkflow = this.db.prepare("SELECT id,status,current_node_id,nodes FROM workflow_runs WHERE task_id=?");
-      const updateWorkflow = this.db.prepare("UPDATE workflow_runs SET status='interrupted',nodes=?,updated_at=? WHERE id=?");
+      const interruptActions = this.db.prepare("UPDATE action_runs SET status='interrupted',completed_at=? WHERE task_id=? AND status='running'");
       const addActivity = this.db.prepare("INSERT INTO task_activities (task_id,type,payload,created_at) VALUES (?,?,?,?)");
       for (const taskId of taskIds) {
         updateTask.run(interruptedAt, taskId);
-        const workflow = getWorkflow.get(taskId) as { id: string; status: string; current_node_id?: string; nodes: string } | undefined;
-        let nodeId: string | undefined;
-        if (workflow && ["running", "interrupted"].includes(workflow.status)) {
-          const nodes = JSON.parse(workflow.nodes) as WorkflowNodeRun[];
-          nodeId = workflow.current_node_id;
-          const current = nodes.find((node) => node.id === nodeId);
-          if (current && current.status === "running") current.status = "interrupted";
-          updateWorkflow.run(JSON.stringify(nodes), interruptedAt, workflow.id);
-        }
-        addActivity.run(taskId, "workflow.interrupted", JSON.stringify({
-          nodeId,
+        interruptActions.run(interruptedAt, taskId);
+        addActivity.run(taskId, "action.interrupted", JSON.stringify({
           reason: "agentdesk_process_stopped",
           sessions: activeSessions.filter((session) => session.task_id === taskId).map((session) => ({ id: session.id, previousStatus: session.status })),
         }), interruptedAt);
@@ -201,28 +190,39 @@ export class Store {
       );
       CREATE INDEX IF NOT EXISTS idx_task_activities_task_id_id
         ON task_activities(task_id, id);
-      CREATE TABLE IF NOT EXISTS workflow_runs (
-        id TEXT PRIMARY KEY,
-        task_id TEXT NOT NULL UNIQUE REFERENCES tasks(id) ON DELETE CASCADE,
-        template_id TEXT NOT NULL,
-        name TEXT NOT NULL,
-        status TEXT NOT NULL,
-        current_node_id TEXT,
-        acceptance_criteria TEXT,
-        nodes TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS workflow_artifacts (
+      DROP TABLE IF EXISTS workflow_artifacts;
+      DROP TABLE IF EXISTS workflow_runs;
+      CREATE TABLE IF NOT EXISTS action_runs (
         id TEXT PRIMARY KEY,
         task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
-        workflow_id TEXT NOT NULL REFERENCES workflow_runs(id) ON DELETE CASCADE,
-        node_id TEXT NOT NULL,
+        type TEXT NOT NULL,
+        status TEXT NOT NULL,
+        input TEXT NOT NULL,
+        output TEXT NOT NULL,
+        snapshot_id TEXT,
+        session_id TEXT,
+        started_at TEXT,
+        completed_at TEXT,
+        created_at TEXT NOT NULL,
+        FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE SET NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_action_runs_task_created ON action_runs(task_id, created_at);
+      CREATE TABLE IF NOT EXISTS action_artifacts (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        action_run_id TEXT NOT NULL REFERENCES action_runs(id) ON DELETE CASCADE,
         kind TEXT NOT NULL,
         title TEXT NOT NULL,
         content TEXT,
         path TEXT,
         metadata TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_action_artifacts_task_created ON action_artifacts(task_id, created_at);
+      CREATE TABLE IF NOT EXISTS code_snapshots (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        repositories TEXT NOT NULL,
         created_at TEXT NOT NULL
       );
     `);
@@ -247,6 +247,12 @@ export class Store {
     }
     if (!taskColumns.some((column) => column.name === "collection_id")) {
       this.db.exec("ALTER TABLE tasks ADD COLUMN collection_id TEXT");
+    }
+    if (!taskColumns.some((column) => column.name === "acceptance_criteria")) {
+      this.db.exec("ALTER TABLE tasks ADD COLUMN acceptance_criteria TEXT");
+    }
+    if (!taskColumns.some((column) => column.name === "delivery_target")) {
+      this.db.exec("ALTER TABLE tasks ADD COLUMN delivery_target TEXT");
     }
     this.db.exec(`
       INSERT INTO task_activities (task_id,type,payload,created_at)
@@ -274,8 +280,8 @@ export class Store {
       this.db
         .prepare(
           `INSERT INTO tasks
-          (id,title,description,provider,status,created_at,updated_at,source_type,source_label,source_external_id,tags,collection_id)
-          VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`,
+          (id,title,description,provider,status,created_at,updated_at,source_type,source_label,source_external_id,tags,collection_id,acceptance_criteria,delivery_target)
+          VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
         )
         .run(
           id,
@@ -290,6 +296,8 @@ export class Store {
           input.source?.externalId?.trim() || null,
           JSON.stringify(normalizeTags(input.tags ?? [])),
           input.collectionId || null,
+          input.acceptanceCriteria?.trim() || null,
+          input.deliveryTarget?.trim() || null,
         );
 
       const insertRepo = this.db.prepare(
@@ -327,9 +335,6 @@ export class Store {
       }
     });
     transaction();
-    if (input.workflow) {
-      this.createWorkflow(id, input.workflow);
-    }
     return this.getTask(id)!;
   }
 
@@ -393,7 +398,11 @@ export class Store {
       sessions: this.sessions(id),
       interactions: this.interactions(id),
       activities: this.activities(id),
-      workflow: this.getWorkflow(id),
+      actions: this.actions(id),
+      artifacts: this.artifacts(id),
+      snapshots: this.snapshots(id),
+      acceptanceCriteria: row.acceptance_criteria ? String(row.acceptance_criteria) : undefined,
+      deliveryTarget: row.delivery_target ? String(row.delivery_target) : undefined,
     };
   }
 
@@ -610,173 +619,86 @@ export class Store {
     }));
   }
 
-  createWorkflow(taskId: string, input: NonNullable<CreateTaskInput["workflow"]>): WorkflowRun {
-    const template = resolveWorkflowTemplate(input.templateId, input.nodes);
-    const timestamp = now();
-    const existingSession = this.sessions(taskId).find((session) => session.providerSessionId);
-    const nodes: WorkflowNodeRun[] = template.nodes.map((node) => ({
-      ...node,
-      status: "pending",
-      attempt: 0,
-      sessionId: node.kind === "development" ? existingSession?.id : undefined,
-    }));
-    const id = randomUUID();
-    this.db
-      .prepare(
-        `INSERT INTO workflow_runs
-         (id,task_id,template_id,name,status,current_node_id,acceptance_criteria,nodes,created_at,updated_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?)`,
-      )
-      .run(
-        id,
-        taskId,
-        template.id,
-        template.name,
-        "idle",
-        null,
-        input.acceptanceCriteria?.trim() || null,
-        JSON.stringify(nodes),
-        timestamp,
-        timestamp,
-      );
-    this.addActivity(taskId, "workflow.configured", {
-      templateId: template.id,
-      name: template.name,
-      nodes: nodes.map((node) => ({ id: node.id, kind: node.kind, name: node.name })),
-    });
-    return this.getWorkflow(taskId)!;
-  }
-
-  replaceWorkflow(taskId: string, input: NonNullable<CreateTaskInput["workflow"]>) {
-    const workflow = this.getWorkflow(taskId);
-    if (!workflow) return this.createWorkflow(taskId, input);
-    if (workflow.status !== "idle" || workflow.nodes.some((node) => node.attempt > 0)) {
-      throw new Error("工作流已经开始执行，不能再更换模板");
-    }
-    this.db.prepare("DELETE FROM workflow_runs WHERE task_id=?").run(taskId);
-    return this.createWorkflow(taskId, input);
-  }
-
-  getWorkflow(taskId: string): WorkflowRun | undefined {
-    const row = this.db.prepare("SELECT * FROM workflow_runs WHERE task_id=?").get(taskId) as
-      | Record<string, unknown>
-      | undefined;
-    if (!row) return undefined;
-    const artifacts = this.db
-      .prepare("SELECT * FROM workflow_artifacts WHERE task_id=? ORDER BY created_at")
-      .all(taskId) as Record<string, unknown>[];
-    return {
-      id: String(row.id),
-      taskId,
-      templateId: String(row.template_id),
-      name: String(row.name),
-      status: row.status as WorkflowRun["status"],
-      currentNodeId: row.current_node_id ? String(row.current_node_id) : undefined,
-      acceptanceCriteria: row.acceptance_criteria ? String(row.acceptance_criteria) : undefined,
-      nodes: JSON.parse(String(row.nodes)) as WorkflowNodeRun[],
-      artifacts: artifacts.map((artifact) => ({
-        id: String(artifact.id),
-        taskId,
-        nodeId: String(artifact.node_id),
-        kind: artifact.kind as WorkflowArtifact["kind"],
-        title: String(artifact.title),
-        content: artifact.content ? String(artifact.content) : undefined,
-        path: artifact.path ? String(artifact.path) : undefined,
-        metadata: JSON.parse(String(artifact.metadata)) as Record<string, unknown>,
-        createdAt: String(artifact.created_at),
-      })),
+  actions(taskId: string): ActionRun[] {
+    const rows = this.db.prepare("SELECT * FROM action_runs WHERE task_id=? ORDER BY created_at").all(taskId) as Record<string, unknown>[];
+    return rows.map((row) => ({
+      id: String(row.id), taskId, type: row.type as ActionRun["type"], status: row.status as ActionRunStatus,
+      input: JSON.parse(String(row.input)), output: JSON.parse(String(row.output)),
+      snapshotId: row.snapshot_id ? String(row.snapshot_id) : undefined,
+      sessionId: row.session_id ? String(row.session_id) : undefined,
+      startedAt: row.started_at ? String(row.started_at) : undefined,
+      completedAt: row.completed_at ? String(row.completed_at) : undefined,
       createdAt: String(row.created_at),
-      updatedAt: String(row.updated_at),
-    };
+    }));
   }
 
-  updateWorkflow(
-    taskId: string,
-    patch: Partial<Pick<WorkflowRun, "status" | "currentNodeId" | "nodes">>,
-  ) {
-    const workflow = this.getWorkflow(taskId);
-    if (!workflow) throw new Error("工作流不存在");
-    const status = patch.status ?? workflow.status;
-    const currentNodeId = patch.currentNodeId === undefined ? workflow.currentNodeId : patch.currentNodeId;
-    const nodes = patch.nodes ?? workflow.nodes;
-    this.db
-      .prepare(
-        "UPDATE workflow_runs SET status=?,current_node_id=?,nodes=?,updated_at=? WHERE task_id=?",
-      )
-      .run(status, currentNodeId ?? null, JSON.stringify(nodes), now(), taskId);
+  createAction(taskId: string, type: ActionRun["type"], input: Record<string, unknown> = {}): ActionRun {
+    const action: ActionRun = { id: randomUUID(), taskId, type, status: "pending", input, output: {}, createdAt: now() };
+    this.db.prepare(`INSERT INTO action_runs (id,task_id,type,status,input,output,created_at) VALUES (?,?,?,?,?,?,?)`)
+      .run(action.id, taskId, type, action.status, JSON.stringify(input), "{}", action.createdAt);
+    return action;
   }
 
-  updateWorkflowNode(
-    taskId: string,
-    nodeId: string,
-    patch: Partial<Pick<WorkflowNodeRun, "status" | "attempt" | "sessionId" | "startedAt" | "completedAt" | "output">>,
-  ) {
-    const workflow = this.getWorkflow(taskId);
-    if (!workflow) throw new Error("工作流不存在");
-    const nodes = workflow.nodes.map((node) => node.id === nodeId ? { ...node, ...patch } : node);
-    this.updateWorkflow(taskId, { nodes });
+  updateAction(id: string, patch: Partial<Pick<ActionRun, "status" | "input" | "output" | "snapshotId" | "sessionId" | "startedAt" | "completedAt">>) {
+    const row = this.db.prepare("SELECT * FROM action_runs WHERE id=?").get(id) as Record<string, unknown> | undefined;
+    if (!row) throw new Error("动作运行不存在");
+    this.db.prepare(`UPDATE action_runs SET status=?,input=?,output=?,snapshot_id=?,session_id=?,started_at=?,completed_at=? WHERE id=?`).run(
+      patch.status ?? row.status,
+      JSON.stringify(patch.input ?? JSON.parse(String(row.input))),
+      JSON.stringify(patch.output ?? JSON.parse(String(row.output))),
+      patch.snapshotId === undefined ? row.snapshot_id : patch.snapshotId ?? null,
+      patch.sessionId === undefined ? row.session_id : patch.sessionId ?? null,
+      patch.startedAt === undefined ? row.started_at : patch.startedAt ?? null,
+      patch.completedAt === undefined ? row.completed_at : patch.completedAt ?? null,
+      id,
+    );
   }
 
-  findWorkflowNodeBySession(sessionId: string) {
-    const rows = this.db.prepare("SELECT task_id,nodes FROM workflow_runs").all() as Array<{
-      task_id: string;
-      nodes: string;
-    }>;
-    for (const row of rows) {
-      const node = (JSON.parse(row.nodes) as WorkflowNodeRun[]).find((item) => item.sessionId === sessionId);
-      if (node) return { taskId: row.task_id, node };
-    }
-    return undefined;
+  findActionBySession(sessionId: string) {
+    const row = this.db.prepare("SELECT * FROM action_runs WHERE session_id=? ORDER BY created_at DESC LIMIT 1").get(sessionId) as Record<string, unknown> | undefined;
+    return row ? this.actions(String(row.task_id)).find((action) => action.id === String(row.id)) : undefined;
   }
 
-  addWorkflowArtifact(
-    taskId: string,
-    nodeId: string,
-    input: Omit<WorkflowArtifact, "id" | "taskId" | "nodeId" | "createdAt">,
-  ) {
-    const workflow = this.getWorkflow(taskId);
-    if (!workflow) throw new Error("工作流不存在");
-    const artifact: WorkflowArtifact = {
-      id: randomUUID(),
-      taskId,
-      nodeId,
-      createdAt: now(),
-      ...input,
-    };
-    this.db
-      .prepare(
-        `INSERT INTO workflow_artifacts
-         (id,task_id,workflow_id,node_id,kind,title,content,path,metadata,created_at)
-         VALUES (?,?,?,?,?,?,?,?,?,?)`,
-      )
-      .run(
-        artifact.id,
-        taskId,
-        workflow.id,
-        nodeId,
-        artifact.kind,
-        artifact.title,
-        artifact.content ?? null,
-        artifact.path ?? null,
-        JSON.stringify(artifact.metadata),
-        artifact.createdAt,
-      );
+  activeAction(taskId: string) {
+    return [...this.actions(taskId)].reverse().find((action) => ["pending", "running", "waiting_user", "interrupted"].includes(action.status));
+  }
+
+  artifacts(taskId: string): ActionArtifact[] {
+    const rows = this.db.prepare("SELECT * FROM action_artifacts WHERE task_id=? ORDER BY created_at").all(taskId) as Record<string, unknown>[];
+    return rows.map((row) => ({
+      id: String(row.id), taskId, actionRunId: String(row.action_run_id), kind: row.kind as ActionArtifact["kind"],
+      title: String(row.title), content: row.content ? String(row.content) : undefined,
+      path: row.path ? String(row.path) : undefined,
+      metadata: JSON.parse(String(row.metadata)), createdAt: String(row.created_at),
+    }));
+  }
+
+  addArtifact(taskId: string, actionRunId: string, input: Omit<ActionArtifact, "id" | "taskId" | "actionRunId" | "createdAt">) {
+    const artifact: ActionArtifact = { id: randomUUID(), taskId, actionRunId, createdAt: now(), ...input };
+    this.db.prepare(`INSERT INTO action_artifacts (id,task_id,action_run_id,kind,title,content,path,metadata,created_at) VALUES (?,?,?,?,?,?,?,?,?)`)
+      .run(artifact.id, taskId, actionRunId, artifact.kind, artifact.title, artifact.content ?? null, artifact.path ?? null, JSON.stringify(artifact.metadata), artifact.createdAt);
     return artifact;
   }
 
-  updateWorkflowArtifact(
-    id: string,
-    patch: Partial<Pick<WorkflowArtifact, "title" | "content" | "path" | "metadata">>,
-  ) {
-    const row = this.db.prepare("SELECT * FROM workflow_artifacts WHERE id=?").get(id) as Record<string, unknown> | undefined;
-    if (!row) throw new Error("工作流产物不存在");
-    this.db.prepare("UPDATE workflow_artifacts SET title=?,content=?,path=?,metadata=? WHERE id=?").run(
-      patch.title ?? String(row.title),
-      patch.content ?? (row.content ? String(row.content) : null),
-      patch.path ?? (row.path ? String(row.path) : null),
-      JSON.stringify(patch.metadata ?? JSON.parse(String(row.metadata))),
-      id,
+  updateArtifact(id: string, patch: Partial<Pick<ActionArtifact, "title" | "content" | "path" | "metadata">>) {
+    const row = this.db.prepare("SELECT * FROM action_artifacts WHERE id=?").get(id) as Record<string, unknown> | undefined;
+    if (!row) throw new Error("动作产物不存在");
+    this.db.prepare("UPDATE action_artifacts SET title=?,content=?,path=?,metadata=? WHERE id=?").run(
+      patch.title ?? row.title, patch.content ?? row.content, patch.path ?? row.path,
+      JSON.stringify(patch.metadata ?? JSON.parse(String(row.metadata))), id,
     );
+  }
+
+  snapshots(taskId: string): CodeSnapshot[] {
+    const rows = this.db.prepare("SELECT * FROM code_snapshots WHERE task_id=? ORDER BY created_at").all(taskId) as Record<string, unknown>[];
+    return rows.map((row) => ({ id: String(row.id), taskId, repositories: JSON.parse(String(row.repositories)), createdAt: String(row.created_at) }));
+  }
+
+  addSnapshot(taskId: string, repositories: CodeSnapshot["repositories"]): CodeSnapshot {
+    const snapshot: CodeSnapshot = { id: randomUUID(), taskId, repositories, createdAt: now() };
+    this.db.prepare("INSERT INTO code_snapshots (id,task_id,repositories,created_at) VALUES (?,?,?,?)")
+      .run(snapshot.id, taskId, JSON.stringify(repositories), snapshot.createdAt);
+    return snapshot;
   }
 
   sessionEvents(sessionId: string): AgentEvent[] {

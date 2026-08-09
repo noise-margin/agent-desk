@@ -168,7 +168,6 @@ export class QoderAdapter implements AgentAdapter {
     });
     runtime.query = q as unknown as Runtime["query"];
     this.store.updateSession(input.sessionId, { status: "running" });
-    this.store.updateTask(input.taskId, { status: "running" });
     this.events.publish(input.taskId, input.sessionId, "session.started", {
       provider: "qoder",
     });
@@ -185,12 +184,10 @@ export class QoderAdapter implements AgentAdapter {
     try {
       for await (const raw of q) this.handleMessage(input, raw as unknown as Record<string, unknown>);
       this.store.updateSession(input.sessionId, { status: "completed" });
-      this.store.updateTask(input.taskId, { status: "completed" });
       this.events.publish(input.taskId, input.sessionId, "turn.completed", {});
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.store.updateSession(input.sessionId, { status: "failed" });
-      this.store.updateTask(input.taskId, { status: "failed" });
       this.events.publish(input.taskId, input.sessionId, "turn.failed", { error: message });
     } finally {
       this.runtimes.delete(input.sessionId);
@@ -218,7 +215,6 @@ export class QoderAdapter implements AgentAdapter {
     this.pending.delete(interactionId);
     pending.deferred.resolve(response);
     this.store.updateSession(interaction.sessionId, { status: "running" });
-    this.store.updateTask(interaction.taskId, { status: "running" });
     this.events.publish(interaction.taskId, interaction.sessionId, "interaction.resolved", {
       interactionId,
       action: response.action,
@@ -249,7 +245,6 @@ export class QoderAdapter implements AgentAdapter {
     interaction: unknown,
   ) {
     this.store.updateSession(input.sessionId, { status: "waiting_user" });
-    this.store.updateTask(input.taskId, { status: "waiting_user" });
     this.events.publish(input.taskId, input.sessionId, "interaction.requested", {
       interactionId,
       interaction,

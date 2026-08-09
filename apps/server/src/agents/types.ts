@@ -9,7 +9,7 @@ export interface StartAgentInput {
   sessionId: string;
   cwd: string;
   prompt: string;
-  mode?: "requirements" | "development" | "review" | "acceptance" | "knowledge";
+  mode?: "planning" | "requirements" | "development" | "review" | "acceptance" | "knowledge" | "delivery";
 }
 
 export interface AgentAdapter {

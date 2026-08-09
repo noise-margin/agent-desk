@@ -7,17 +7,17 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type {
   CreateTaskInput,
+  ExecuteActionInput,
   HealthResponse,
   ResolveInteractionInput,
   SaveRegisteredRepositoryInput,
-  StartRunInput,
 } from "@agentdesk/protocol";
 import { config } from "./config.js";
 import { EventBus } from "./event-bus.js";
 import { Orchestrator } from "./orchestrator.js";
 import { Store } from "./store.js";
 import { WorkspaceService } from "./workspace.js";
-import { WorkflowEngine } from "./workflow-engine.js";
+import { ActionEngine } from "./action-engine.js";
 
 const createTaskSchema = z.object({
   title: z.string().trim().min(1).max(160),
@@ -39,20 +39,8 @@ const createTaskSchema = z.object({
   }).optional(),
   tags: z.array(z.string().trim().min(1).max(40)).max(20).optional(),
   collectionId: z.string().uuid().optional(),
-  workflow: z.object({
-    templateId: z.string().min(1),
-    acceptanceCriteria: z.string().optional(),
-    nodes: z.array(z.object({
-      id: z.string().min(1),
-      kind: z.enum(["requirement_analysis", "human_requirement_approval", "development", "agent_review", "agent_acceptance", "knowledge_review", "human_review", "commit"]),
-      name: z.string().min(1),
-      prompt: z.string().optional(),
-    })).optional(),
-  }).optional(),
-});
-
-const runSchema = z.object({
-  prompt: z.string().trim().min(1),
+  acceptanceCriteria: z.string().optional(),
+  deliveryTarget: z.string().optional(),
 });
 
 const followUpSchema = z.object({
@@ -72,14 +60,11 @@ const openPathSchema = z.object({
   repositoryId: z.string().optional(),
 });
 
-const workflowDecisionSchema = z.object({
-  action: z.enum(["approve", "request_changes", "discard", "retry", "recover"]),
+const taskActionSchema = z.object({
+  type: z.enum(["generate_plan", "revise_plan", "accept_plan", "start_development", "request_changes", "run_code_review", "run_acceptance", "checkpoint_and_continue", "deliver", "generate_knowledge_proposal", "revise_knowledge_proposal", "accept_knowledge", "reject_knowledge", "archive"]),
+  instruction: z.string().trim().max(100_000).optional(),
   feedback: z.string().trim().max(20_000).optional(),
-});
-
-const workflowConfigSchema = z.object({
-  templateId: z.string().min(1),
-  acceptanceCriteria: z.string().optional(),
+  artifactId: z.string().uuid().optional(),
 });
 
 const collectionSchema = z.object({
@@ -135,10 +120,10 @@ export async function registerRoutes(
     events: EventBus;
     workspace: WorkspaceService;
     orchestrator: Orchestrator;
-    workflowEngine: WorkflowEngine;
+    actionEngine: ActionEngine;
   },
 ) {
-  const { store, events, workspace, orchestrator, workflowEngine } = services;
+  const { store, events, workspace, orchestrator, actionEngine } = services;
 
   app.get("/api/health", async (): Promise<HealthResponse> => ({
     ok: true,
@@ -183,21 +168,22 @@ export async function registerRoutes(
     }
   });
 
-  app.get("/api/workflow-templates", async () => workflowEngine.templates());
-
-  app.post<{ Params: { id: string } }>("/api/tasks/:id/workflow", async (request, reply) => {
-    const parsed = workflowConfigSchema.safeParse(request.body);
-    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message });
+  app.get<{ Params: { id: string } }>("/api/tasks/:id/available-actions", async (request, reply) => {
     if (!store.getTask(request.params.id)) return reply.code(404).send({ error: "任务不存在" });
-    if (store.getWorkflow(request.params.id)) return reply.code(409).send({ error: "任务已经配置工作流" });
-    return reply.code(201).send(store.createWorkflow(request.params.id, parsed.data));
+    return actionEngine.availableActions(request.params.id);
   });
 
-  app.put<{ Params: { id: string } }>("/api/tasks/:id/workflow", async (request, reply) => {
-    const parsed = workflowConfigSchema.safeParse(request.body);
+  app.post<{ Params: { id: string } }>("/api/tasks/:id/actions", async (request, reply) => {
+    const parsed = taskActionSchema.safeParse(request.body);
     if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message });
     try {
-      return store.replaceWorkflow(request.params.id, parsed.data);
+      let task = store.getTask(request.params.id);
+      if (task && !task.workspacePath) {
+        await workspace.prepare(request.params.id);
+        task = store.getTask(request.params.id);
+      }
+      if (!task) return reply.code(404).send({ error: "任务不存在" });
+      return reply.code(202).send(await actionEngine.execute(request.params.id, parsed.data as ExecuteActionInput));
     } catch (error) {
       return reply.code(409).send({ error: error instanceof Error ? error.message : String(error) });
     }
@@ -451,61 +437,14 @@ export async function registerRoutes(
     }
   });
 
-  app.post<{ Params: { id: string } }>("/api/tasks/:id/run", async (request, reply) => {
-    const parsed = runSchema.safeParse(request.body);
-    if (!parsed.success) {
-      return reply.code(400).send({ error: parsed.error.issues[0]?.message });
-    }
-    try {
-      let task = store.getTask(request.params.id);
-      if (task && !task.workspacePath) {
-        await workspace.prepare(request.params.id);
-        task = store.getTask(request.params.id);
-      }
-      const result = task?.workflow
-        ? await workflowEngine.start(request.params.id, parsed.data.prompt)
-        : orchestrator.start(request.params.id, parsed.data as StartRunInput);
-      return reply.code(202).send(result);
-    } catch (error) {
-      return reply.code(400).send({
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  });
-
   app.get<{ Params: { id: string } }>("/api/tasks/:id/diff", async (request, reply) => {
     try {
-      return await workflowEngine.diff(request.params.id);
+      return await actionEngine.diff(request.params.id);
     } catch (error) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
     }
   });
 
-  app.post<{ Params: { id: string } }>(
-    "/api/tasks/:id/workflow-decision",
-    async (request, reply) => {
-      const parsed = workflowDecisionSchema.safeParse(request.body);
-      if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message });
-      try {
-        if (parsed.data.action === "approve") {
-          return await workflowEngine.approve(request.params.id, parsed.data.feedback);
-        }
-        if (parsed.data.action === "request_changes") {
-          if (!parsed.data.feedback) return reply.code(400).send({ error: "请填写修改意见" });
-          return await workflowEngine.requestChanges(request.params.id, parsed.data.feedback);
-        }
-        if (parsed.data.action === "retry") {
-          return await workflowEngine.retryCurrentQualityNode(request.params.id);
-        }
-        if (parsed.data.action === "recover") {
-          return await workflowEngine.retryFailedNodeRecovery(request.params.id);
-        }
-        return await workflowEngine.discard(request.params.id);
-      } catch (error) {
-        return reply.code(409).send({ error: error instanceof Error ? error.message : String(error) });
-      }
-    },
-  );
 
   app.post<{ Params: { id: string } }>(
     "/api/tasks/:id/follow-ups",
@@ -545,9 +484,14 @@ export async function registerRoutes(
         const hasActiveSession = task.sessions.some((session) =>
           ["starting", "running", "waiting_user"].includes(session.status),
         );
-        if (task.workflow && !hasActiveSession && ["idle", "completed"].includes(task.workflow.status)) {
-          const workflow = await workflowEngine.start(task.id, instruction);
-          return reply.code(202).send({ mode: "new_turn", workflowId: workflow.id });
+        if (!hasActiveSession) {
+          const available = actionEngine.availableActions(task.id);
+          const type = available.some((action) => action.type === "request_changes") ? "request_changes"
+            : available.some((action) => action.type === "start_development") ? "start_development" : undefined;
+          if (type) {
+            await actionEngine.execute(task.id, type === "request_changes" ? { type, feedback: instruction } : { type, instruction });
+            return reply.code(202).send({ mode: "new_turn", action: type });
+          }
         }
         return reply.code(202).send(await orchestrator.followUp(task.id, instruction));
       } catch (error) {
@@ -562,7 +506,7 @@ export async function registerRoutes(
     "/api/tasks/:id/interrupt",
     async (request, reply) => {
       try {
-        await orchestrator.interrupt(request.params.id);
+        await actionEngine.interrupt(request.params.id);
         return { ok: true };
       } catch (error) {
         return reply.code(400).send({

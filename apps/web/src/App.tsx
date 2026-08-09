@@ -41,7 +41,6 @@ import {
 } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
-  AcceptanceFinding,
   AgentEvent,
   AgentProvider,
   CodeDiffFile,
@@ -49,6 +48,7 @@ import type {
   InteractionResolutionPresentation,
   PendingInteraction,
   Task,
+  TaskAction,
   TaskActivity,
   TaskRepositoryInput,
 } from "@agentdesk/protocol";
@@ -57,17 +57,14 @@ import { api, subscribeTaskEvents } from "./api";
 const statusText: Record<Task["status"], string> = {
   draft: "草稿",
   preparing: "准备中",
-  defining_requirements: "需求分析中",
-  pending_requirement_confirmation: "待确认需求",
   ready: "工作区就绪",
-  running: "运行中",
-  waiting_user: "等待回答",
-  pending_review: "待人工审核",
-  changes_requested: "待修改",
-  verifying: "验收中",
-  approved: "已批准",
-  discarded: "已回退",
-  completed: "已完成",
+  working: "执行中",
+  waiting_user: "等待选择",
+  delivering: "交付中",
+  delivered: "代码已交付",
+  knowledge_pending: "待确认知识提案",
+  closed: "已关闭",
+  archived: "已归档",
   interrupted: "恢复中",
   failed: "失败",
   cancelled: "已中止",
@@ -76,17 +73,14 @@ const statusText: Record<Task["status"], string> = {
 const statusTone: Record<Task["status"], string> = {
   draft: "neutral",
   preparing: "info",
-  defining_requirements: "active",
-  pending_requirement_confirmation: "warning",
   ready: "info",
-  running: "active",
+  working: "active",
   waiting_user: "warning",
-  pending_review: "warning",
-  changes_requested: "danger",
-  verifying: "active",
-  approved: "success",
-  discarded: "neutral",
-  completed: "success",
+  delivering: "active",
+  delivered: "success",
+  knowledge_pending: "warning",
+  closed: "success",
+  archived: "neutral",
   interrupted: "warning",
   failed: "danger",
   cancelled: "neutral",
@@ -102,12 +96,10 @@ const defaultDevelopmentPrompt =
   "请先阅读需求材料并分析关联仓库，给出实现方案。确认条件完整后再开始修改代码，完成后运行相关测试。";
 
 function taskStatusLabel(task: Task) {
-  if (task.workflow?.status === "idle" && task.sessions.length > 0) return "可开始下一轮";
   return statusText[task.status];
 }
 
 function taskStatusTone(task: Task) {
-  if (task.workflow?.status === "idle" && task.sessions.length > 0) return "info";
   return statusTone[task.status];
 }
 
@@ -409,25 +401,15 @@ function TaskDetail({
   const [tab, setTab] = useState<"timeline" | "workbench">("workbench");
   const [debugOpen, setDebugOpen] = useState(false);
   const [previewMaterialId, setPreviewMaterialId] = useState<string>();
-  const [previewRequirementId, setPreviewRequirementId] = useState<string>();
   const [addRepositoryOpen, setAddRepositoryOpen] = useState(false);
   const pending = task.interactions.filter((item) => item.status === "pending");
-  const busy = task.status === "running" || task.status === "waiting_user" || task.status === "interrupted";
-  const hasRun = task.sessions.length > 0;
-  const workflowBlocked = Boolean(task.workflow && ["waiting_user", "changes_requested", "failed"].includes(task.workflow.status));
+  const busy = task.sessions.some((session) => ["starting", "running", "waiting_user"].includes(session.status));
 
   useEffect(() => {
     setPrompt(defaultDevelopmentPrompt);
     setTab("workbench");
   }, [task.id]);
 
-  const run = useMutation({
-    mutationFn: () => api.run(task.id, prompt),
-    onSuccess: () => {
-      notify(task.workspacePath ? "Agent 已启动" : "工作区已自动准备，Agent 已启动");
-      onChanged();
-    },
-  });
   const followUp = useMutation({
     mutationFn: () => api.followUp(task.id, prompt, true),
     onSuccess: (result) => {
@@ -474,11 +456,9 @@ function TaskDetail({
     onSuccess: () => notify("已在文件资源管理器中打开"),
   });
 
-  const currentWorkflowNode = task.workflow?.nodes.find((node) => node.id === task.workflow?.currentNodeId);
-  const latestSession = task.sessions.find((session) => session.id === currentWorkflowNode?.sessionId)
-    ?? task.sessions.find((session) => ["starting", "running", "waiting_user", "interrupted"].includes(session.status))
+  const latestSession = task.sessions.find((session) => ["starting", "running", "waiting_user", "interrupted"].includes(session.status))
     ?? task.sessions[0];
-  const latestSessionNode = task.workflow?.nodes.find((node) => node.sessionId === latestSession?.id);
+  const latestSessionAction = [...task.actions].reverse().find((action) => action.sessionId === latestSession?.id);
   return (
     <div className="task-detail">
       <header className="task-header">
@@ -490,7 +470,7 @@ function TaskDetail({
           <div className="title-line">
             <h1>{task.title}</h1>
             <span className={`status-pill ${taskStatusTone(task)}`}>
-              {task.status === "running" && <span className="pulse" />}
+              {(task.status === "working" || task.status === "delivering") && <span className="pulse" />}
               {taskStatusLabel(task)}
             </span>
           </div>
@@ -512,9 +492,9 @@ function TaskDetail({
         </div>
       </header>
 
-      {(run.error || followUp.error || upload.error || deleteMaterial.error || interrupt.error || openPath.error) && (
+      {(followUp.error || upload.error || deleteMaterial.error || interrupt.error || openPath.error) && (
         <ErrorBanner
-          error={run.error || followUp.error || upload.error || deleteMaterial.error || interrupt.error || openPath.error}
+          error={followUp.error || upload.error || deleteMaterial.error || interrupt.error || openPath.error}
         />
       )}
 
@@ -604,11 +584,11 @@ function TaskDetail({
             </button>
           </ContextGroup>
           {latestSession?.providerSessionId && (
-            <ContextGroup title={`${agentMeta[latestSession.provider].name} Session · ${latestSessionNode?.name ?? "任务"}`}>
+            <ContextGroup title={`${agentMeta[latestSession.provider].name} Session · ${latestSessionAction?.type ?? "任务"}`}>
               <code className="session-id" title={latestSession.providerSessionId}>
                 {latestSession.providerSessionId}
               </code>
-              <span className="context-help">同一工作流角色的修订或返工会复用该会话。</span>
+              <span className="context-help">计划修订和开发返工会尽量复用原 Agent 会话。</span>
             </ContextGroup>
           )}
         </section>
@@ -628,11 +608,9 @@ function TaskDetail({
               activities={task.activities}
               interactions={task.interactions}
               sessions={task.sessions}
-              requirementArtifacts={task.workflow?.artifacts.filter((artifact) => artifact.kind === "requirement") ?? []}
               onOpenWorkbench={() => setTab("workbench")}
               onPreviewMaterial={(materialId) => setPreviewMaterialId(materialId)}
-              onPreviewRequirement={(artifactId) => setPreviewRequirementId(artifactId)}
-              running={task.status === "running" || task.status === "waiting_user"}
+              running={busy}
               hasMore={eventsHasMore}
               loading={eventsLoading}
               onLoadOlder={onLoadOlder}
@@ -647,21 +625,13 @@ function TaskDetail({
                   {pending.map((interaction) => <InteractionCard key={interaction.id} interaction={interaction} onChanged={onChanged} />)}
                 </section>
               )}
-              {task.workflow && !workflowBlocked && (
+              {busy && (
                 <div className={`prompt-pane workbench-composer ${busy ? "is-running" : "is-ready"}`}>
                   <div className="composer-heading">
-                    <label htmlFor="run-prompt">
-                      {busy ? "补充本轮要求" : hasRun ? "下一步：描述本轮开发目标" : "下一步：描述首轮开发目标"}
-                    </label>
+                    <label htmlFor="run-prompt">补充当前 Agent 要求</label>
                     {busy && task.provider === "codex" ? <span>实时介入</span> : <span>立即可操作</span>}
                   </div>
-                  <p className="composer-description">
-                    {!task.workspacePath
-                      ? "点击开始后，AgentDesk 会自动创建工作区并启动 Agent，无需额外准备。"
-                      : busy
-                      ? "补充内容会发送给当前 Agent，不会重新启动任务。"
-                      : `点击开始后，将按“${task.workflow.name}”依次执行下方节点。`}
-                  </p>
+                  <p className="composer-description">补充内容会发送给当前 Agent，不会启动新的动作。</p>
                   <textarea
                     id="run-prompt"
                     value={prompt}
@@ -677,35 +647,30 @@ function TaskDetail({
                     <button
                       className="primary-button"
                       disabled={
-                        run.isPending ||
                         followUp.isPending ||
                         !prompt.trim() ||
                         (busy && task.provider !== "codex")
                       }
                       onClick={() => {
-                        if (task.workspacePath && (busy || hasRun)) followUp.mutate();
-                        else run.mutate();
+                        followUp.mutate();
                       }}
                     >
-                      {run.isPending || followUp.isPending ? (
+                      {followUp.isPending ? (
                         <LoaderCircle className="spin" size={16} />
                       ) : busy ? (
                         <Send size={16} />
                       ) : (
                         <Play size={16} />
                       )}
-                      {busy ? "发送给当前 Agent" : "开始本轮开发"}
+                      发送给当前 Agent
                     </button>
-                    {!busy && <span>{hasRun ? "将复用现有 Agent 会话，历史结果不会重新执行。" : "工作区会自动准备；启动后可在时间线查看实时进度。"}</span>}
                   </div>
                   {busy && task.provider !== "codex" && (
                     <span className="form-hint">当前 Agent 暂不支持运行中介入，请等待本轮结束。</span>
                   )}
                 </div>
               )}
-              {task.workflow
-                ? <WorkflowPanel task={task} onChanged={onChanged} notify={notify} />
-                : <WorkflowSetup task={task} onChanged={onChanged} notify={notify} />}
+              <ActionPanel task={task} busy={busy} onChanged={onChanged} notify={notify} />
             </div>
           )}
         </section>
@@ -717,10 +682,6 @@ function TaskDetail({
           onClose={() => setPreviewMaterialId(undefined)}
         />
       )}
-      {previewRequirementId && task.workflow && (() => {
-        const artifact = task.workflow.artifacts.find((item) => item.id === previewRequirementId && item.kind === "requirement");
-        return artifact ? <RequirementDocumentPreview artifact={artifact} onClose={() => setPreviewRequirementId(undefined)} /> : null;
-      })()}
       {addRepositoryOpen && (
         <AddTaskRepositoryDialog
           task={task}
@@ -772,190 +733,69 @@ function TaskOrganizer({ task, onChanged, notify }: { task: Task; onChanged(): v
   );
 }
 
-function WorkflowSetup({ task, onChanged, notify, replace = false }: { task: Task; onChanged(): void; notify(message: string): void; replace?: boolean }) {
-  const templates = useQuery({ queryKey: ["workflow-templates"], queryFn: api.workflowTemplates });
-  const [selected, setSelected] = useState("requirements");
-  const [criteria, setCriteria] = useState("");
-  const configure = useMutation({
-    mutationFn: () => (replace ? api.replaceWorkflow : api.configureWorkflow)(task.id, { templateId: selected, acceptanceCriteria: criteria }),
-    onSuccess: () => { notify(replace ? "工作流模板已更换" : "工作流已配置，发送下一轮指令后开始执行"); onChanged(); },
-  });
-  return (
-    <div className="workflow-panel workflow-setup">
-      <div className="workflow-setup-intro"><Workflow size={28} /><strong>{replace ? "更换下一轮工作流" : "为现有任务配置下一轮工作流"}</strong><span>配置不会重新执行已完成的历史开发。发送新的开发指令后，才会按照该流程执行增量开发；开始运行后模板将被锁定。</span></div>
-      <div className="workflow-setup-templates">
-        {templates.data?.map((template) => (
-          <button className={selected === template.id ? "selected" : ""} key={template.id} onClick={() => setSelected(template.id)}>
-            <strong>{template.name}</strong><span>{template.description}</span>
-          </button>
-        ))}
-      </div>
-      {selected === "acceptance" && <textarea rows={4} value={criteria} onChange={(event) => setCriteria(event.target.value)} placeholder="填写可验证的验收目标…" />}
-      <button className="primary-button" onClick={() => configure.mutate()} disabled={configure.isPending}><Workflow size={14} />{replace ? "保存新模板" : "配置此工作流"}</button>
-      {configure.error && <ErrorBanner error={configure.error} />}
-    </div>
-  );
-}
-
-function WorkflowPanel({ task, onChanged, notify }: { task: Task; onChanged(): void; notify(message: string): void }) {
-  const workflow = task.workflow!;
-  const [editingTemplate, setEditingTemplate] = useState(false);
-  const [feedback, setFeedback] = useState("");
-  const diff = useQuery({
-    queryKey: ["task-diff", task.id],
-    queryFn: () => api.diff(task.id),
-    enabled: false,
-  });
-  const current = workflow.nodes.find((node) => node.id === workflow.currentNodeId);
-  const requirementApproval = current?.kind === "human_requirement_approval" && current.status === "waiting_user";
-  const qualityNode = current && ["agent_review", "agent_acceptance"].includes(current.kind) ? current : undefined;
-  const qualityArtifactKind = current?.kind === "agent_review" ? "review" : current?.kind === "agent_acceptance" ? "acceptance" : undefined;
-  const latestQualityArtifact = qualityArtifactKind ? [...workflow.artifacts].reverse().find((artifact) => artifact.kind === qualityArtifactKind) : undefined;
-  const qualityVerdict = String(latestQualityArtifact?.metadata.verdict ?? qualityNode?.output?.verdict ?? "");
-  const qualityInconclusive = qualityVerdict === "INCONCLUSIVE";
-  const canRetry = Boolean(qualityNode && ["failed", "waiting_user"].includes(qualityNode.status));
-  const generatedQualityFeedback = latestQualityArtifact
-    ? `独立${current?.kind === "agent_review" ? "代码审查" : "验收"}未通过，请逐项修复以下报告中的 blocking 问题，并运行相关回归测试：\n\n${latestQualityArtifact.content ?? latestQualityArtifact.metadata.summary ?? "未提供报告"}`
-    : "";
-  const decision = useMutation({
-    mutationFn: (input: { action: "approve" | "request_changes" | "discard" | "retry" | "recover"; feedback?: string }) =>
-      api.workflowDecision(task.id, input),
-    onSuccess: (_result, input) => {
-      notify(input.action === "recover" ? "已重新恢复当前节点" : input.action === "retry" ? "已启动重新验收" : input.action === "approve" ? (requirementApproval ? "需求已确认，开发节点已启动" : "审核已通过") : input.action === "discard" ? "已回退到开发前检查点" : (requirementApproval ? "需求修改意见已发送给分析 Agent" : "完整问题报告已发送给原开发 Agent"));
-      setFeedback("");
+function ActionPanel({ task, busy, onChanged, notify }: { task: Task; busy: boolean; onChanged(): void; notify(message: string): void }) {
+  const [instruction, setInstruction] = useState("");
+  const available = useQuery({ queryKey: ["available-actions", task.id, task.updatedAt], queryFn: () => api.availableActions(task.id) });
+  const diff = useQuery({ queryKey: ["task-diff", task.id], queryFn: () => api.diff(task.id), enabled: false });
+  const execute = useMutation({
+    mutationFn: (type: TaskAction) => api.executeAction(task.id, { type, instruction: instruction.trim() || undefined, feedback: instruction.trim() || undefined }),
+    onSuccess: (_result, type) => {
+      notify(`已启动：${actionLabels[type] ?? type}`);
+      setInstruction("");
+      void available.refetch();
       onChanged();
     },
   });
-  const canApprove = (current?.kind === "human_review" || current?.kind === "human_requirement_approval") && current.status === "waiting_user";
-  const canRequestChanges = !qualityInconclusive && (current?.status === "waiting_user" || workflow.status === "changes_requested");
-  const canRecover = workflow.status === "failed" && current?.status === "failed";
-  const nodeStatus: Record<string, string> = {
-    pending: "未开始",
-    running: "执行中",
-    waiting_user: "等待人工",
-    succeeded: "通过",
-    failed: "未通过",
-    changes_requested: "已打回",
-    interrupted: "异常中断",
-    skipped: "已跳过",
-  };
-  const workflowStatus: Record<string, string> = {
-    idle: "待启动下一轮",
-    running: "执行中",
-    waiting_user: "等待人工处理",
-    changes_requested: "已打回修改",
-    interrupted: "正在恢复",
-    completed: "已完成",
-    failed: "执行失败",
-  };
-  if (editingTemplate && workflow.status === "idle") {
-    return <WorkflowSetup task={task} onChanged={() => { setEditingTemplate(false); onChanged(); }} notify={notify} replace />;
-  }
-  return (
-    <div className="workflow-panel">
-      <header className="workflow-heading">
-        <div><Workflow size={17} /><span><strong>{workflow.name}</strong><small>{workflowStatus[workflow.status] ?? workflow.status}</small></span></div>
-        <button className="secondary-button" onClick={() => void diff.refetch()} disabled={diff.isFetching}>
-          {diff.isFetching ? <LoaderCircle className="spin" size={14} /> : <GitCompare size={14} />}查看代码与知识 Diff
-        </button>
-      </header>
-      <div className="workflow-nodes">
-        {workflow.nodes.map((node, index) => (
-          <div className={`workflow-node ${node.status} ${node.id === workflow.currentNodeId ? "current" : ""}`} key={node.id}>
-            <span className="workflow-node-index">{node.status === "succeeded" ? <Check size={13} /> : index + 1}</span>
-            <div><strong>{node.name}</strong><small>{nodeStatus[node.status] ?? node.status}{node.attempt ? ` · 第 ${node.attempt} 次` : ""}</small></div>
-            {index < workflow.nodes.length - 1 && <ChevronRight size={14} />}
-          </div>
-        ))}
-      </div>
-      {workflow.status === "idle" && (
-        <section className="workflow-idle-notice">
-          <div><strong>本轮将从“{workflow.nodes[0]?.name ?? "开发实现"}”开始</strong><span>上方是当前唯一的启动入口；下方展示本轮会依次经过的流程和验收目标。</span></div>
-          <div><button className="secondary-button" onClick={() => setEditingTemplate(true)}><Settings2 size={14} />调整本轮流程</button></div>
-        </section>
-      )}
-      {workflow.acceptanceCriteria && (
-        <section className="acceptance-criteria"><strong>验收目标</strong><p>{workflow.acceptanceCriteria}</p></section>
-      )}
-      {workflow.artifacts.some((artifact) => artifact.kind === "requirement") && (() => {
-        const requirement = [...workflow.artifacts].reverse().find((artifact) => artifact.kind === "requirement")!;
-        const sources = Array.isArray(requirement.metadata.sourceMaterials) ? requirement.metadata.sourceMaterials as Array<{ name?: string }> : [];
-        return <section className="requirement-document">
-          <header><span><FileText size={14} /><strong>{requirement.title}</strong></span><span>基于 {sources.length} 份材料</span></header>
-          <pre>{requirement.content}</pre>
-          {requirement.path && <code>{shortPath(requirement.path)}</code>}
-        </section>;
-      })()}
-      {(canApprove || canRequestChanges || canRetry || canRecover) && (
-        <section className="review-gate">
-          <div><strong>{canRecover ? "自动恢复未能完成" : qualityInconclusive ? "本次验收无法得出结论" : requirementApproval ? "请确认 Agent 对需求的理解" : canApprove ? "等待你的审核结论" : "审查或验收未通过"}</strong><span>{canRecover ? "执行现场仍然保留。检查本地 Agent 和工作区状态后，可以重新恢复当前节点。" : qualityInconclusive ? "这通常是环境、权限或依赖不可用导致的，不会误判为代码缺陷。处理环境问题后可重新验收。" : requirementApproval ? "核对需求范围、边界条件、待确认问题和验收标准；不准确时附带意见重新生成。" : "结构化问题和证据展示在下方；可补充意见后将完整报告打回原开发 Thread。"}</span></div>
-          {!qualityInconclusive && !canRecover && <textarea value={feedback} onChange={(event) => setFeedback(event.target.value)} rows={3} placeholder={requirementApproval ? "可选：确认备注；或填写需要补充、纠正的需求…" : latestQualityArtifact ? "可选：补充给 Coding Agent 的修改意见；留空则直接发送完整验收报告" : "填写审核备注或需要修改的问题…"} />}
-          <div className="review-actions">
-            {canApprove && <button className="primary-button" onClick={() => decision.mutate({ action: "approve", feedback })}><Check size={14} />{requirementApproval ? "确认需求并进入开发" : "审核通过"}</button>}
-            {canRecover && <button className="primary-button" onClick={() => decision.mutate({ action: "recover" })}><RefreshCw size={14} />重新恢复当前节点</button>}
-            {canRetry && <button className="secondary-button" onClick={() => decision.mutate({ action: "retry" })}><RefreshCw size={14} />重新执行{current?.kind === "agent_review" ? "审查" : "验收"}</button>}
-            {canRequestChanges && <button className="secondary-button danger-button" disabled={requirementApproval ? !feedback.trim() : !feedback.trim() && !generatedQualityFeedback} onClick={() => decision.mutate({ action: "request_changes", feedback: [feedback.trim(), generatedQualityFeedback].filter(Boolean).join("\n\n") })}><RefreshCw size={14} />{requirementApproval ? "要求重新整理" : "将问题打回修改"}</button>}
-            {!requirementApproval && <button className="ghost-button" onClick={() => {
-              if (window.confirm("放弃当前开发结果并回退到开发前检查点？回退前修改会保存到 Git stash。")) decision.mutate({ action: "discard" });
-            }}><Trash2 size={14} />放弃并回退</button>}
-          </div>
-          {decision.error && <ErrorBanner error={decision.error} />}
-        </section>
-      )}
-      {(diff.data || diff.error) && (
-        <section className="diff-workbench">
-          <h3>代码与知识变更</h3>
-          {diff.error && <ErrorBanner error={diff.error} />}
-          {diff.data?.map((repo) => (
-            <div className="repo-diff" key={repo.path}>
-              <header><span><GitBranch size={13} /><strong>{shortPath(repo.path)}</strong></span><span>{repo.files.length} 个文件 <b className="diff-additions">+{repo.additions}</b><b className="diff-deletions">−{repo.deletions}</b></span></header>
-              {!repo.files.length && <SmallEmpty>当前没有未提交的代码或知识变更。</SmallEmpty>}
-              {repo.files.map((file, index) => <DiffFileCard file={file} key={`${file.path}-${index}`} defaultOpen={repo.files.length <= 5} />)}
-            </div>
-          ))}
-        </section>
-      )}
-      <section className="evidence-workbench">
-        <h3>审核与验收证据 <span>{workflow.artifacts.length}</span></h3>
-        {!workflow.artifacts.length && <SmallEmpty>节点完成后，Review 报告、测试命令、验收结论和 Git 检查点会显示在这里。</SmallEmpty>}
-        {[...workflow.artifacts].reverse().filter((artifact) => artifact.kind !== "requirement").map((artifact) => (
-          <details className={`evidence-card ${artifact.kind}`} key={artifact.id}>
-            <summary><FileText size={13} /><strong>{artifact.title}</strong><time>{formatTime(artifact.createdAt)}</time></summary>
-            {(artifact.kind === "acceptance" || artifact.kind === "review") && artifact.metadata.verdict
-              ? <QualityReport verdict={String(artifact.metadata.verdict)} summary={String(artifact.metadata.summary ?? "")} findings={Array.isArray(artifact.metadata.findings) ? artifact.metadata.findings as AcceptanceFinding[] : []} />
-              : artifact.content && <pre>{artifact.content}</pre>}
-            {artifact.content && Boolean(artifact.metadata.verdict) && <details className="quality-raw-report"><summary>查看 Agent 原始报告</summary><pre>{artifact.content}</pre></details>}
-            {Object.keys(artifact.metadata).length > 0 && <details className="evidence-metadata"><summary>结构化信息</summary><pre>{JSON.stringify(artifact.metadata, null, 2)}</pre></details>}
-          </details>
-        ))}
-      </section>
+  const latestSnapshot = task.snapshots.at(-1);
+  const needsInstruction = available.data?.some((action) => action.requiresInstruction);
+  return <div className="action-panel">
+    <header className="action-heading">
+      <div><Workflow size={17} /><span><strong>下一步</strong><small>根据当前结果自由选择，不受固定模板约束</small></span></div>
+      <button className="secondary-button" onClick={() => void diff.refetch()} disabled={diff.isFetching}>{diff.isFetching ? <LoaderCircle className="spin" size={14} /> : <GitCompare size={14} />}查看代码 Diff</button>
+    </header>
+    {(task.deliveryTarget || task.acceptanceCriteria) && <section className="acceptance-criteria">
+      {task.deliveryTarget && <><strong>交付目标</strong><p>{task.deliveryTarget}</p></>}
+      {task.acceptanceCriteria && <><strong>验收标准</strong><p>{task.acceptanceCriteria}</p></>}
+    </section>}
+    {needsInstruction && <textarea value={instruction} onChange={(event) => setInstruction(event.target.value)} rows={3} placeholder="填写计划修改意见、打回原因或知识修订意见；直接开发等动作可留空" />}
+    <div className="action-grid">
+      {available.isLoading && <SmallEmpty>正在计算可执行动作…</SmallEmpty>}
+      {available.data?.map((action) => <button disabled={busy || execute.isPending || Boolean(action.requiresInstruction && !instruction.trim())} key={action.type} onClick={() => execute.mutate(action.type)}>
+        <strong>{action.label}</strong><span>{action.description}</span>
+      </button>)}
     </div>
-  );
-}
-
-function QualityReport({ verdict, summary, findings }: { verdict: string; summary: string; findings: AcceptanceFinding[] }) {
-  const verdictText: Record<string, string> = {
-    PASS: "验收通过",
-    PASS_WITH_WARNINGS: "通过但有提醒",
-    FAIL: "验收未通过",
-    INCONCLUSIVE: "无法得出结论",
-  };
-  return <div className="quality-report">
-    <header className={`quality-verdict ${verdict.toLowerCase()}`}><strong>{verdictText[verdict] ?? verdict}</strong><span>{findings.length} 个发现</span></header>
-    {summary && <p>{summary}</p>}
-    <div className="quality-findings">
-      {findings.map((finding) => <article className={`quality-finding ${finding.severity}`} key={finding.id}>
-        <header><span><b>{finding.id}</b>{finding.requirementId && <code>{finding.requirementId}</code>}{finding.acceptanceId && <code>{finding.acceptanceId}</code>}</span><i>{finding.severity === "blocking" ? "阻塞" : finding.severity === "warning" ? "警告" : "提示"}</i></header>
-        <strong>{finding.title}</strong>
-        {(finding.expected || finding.actual) && <div className="finding-comparison">{finding.expected && <span><small>预期</small>{finding.expected}</span>}{finding.actual && <span><small>实际</small>{finding.actual}</span>}</div>}
-        {finding.reproductionSteps.length > 0 && <div className="finding-steps"><small>复现步骤</small><ol>{finding.reproductionSteps.map((step, index) => <li key={index}>{step}</li>)}</ol></div>}
-        {finding.evidence && <div className="finding-evidence"><small>证据</small>{finding.evidence.command && <code>{finding.evidence.command}</code>}{finding.evidence.file && <code>{finding.evidence.file}</code>}{finding.evidence.output && <pre>{finding.evidence.output}</pre>}</div>}
-        {finding.suggestedDirection && <p className="finding-direction"><small>建议排查</small>{finding.suggestedDirection}</p>}
-      </article>)}
-      {!findings.length && <SmallEmpty>Agent 未返回结构化问题；可查看下方原始报告。</SmallEmpty>}
-    </div>
+    {(available.error || execute.error) && <ErrorBanner error={available.error || execute.error} />}
+    {latestSnapshot && <section className="requirement-document">
+      <header><span><GitBranch size={14} /><strong>最近代码快照</strong></span><span>{formatTime(latestSnapshot.createdAt)}</span></header>
+      <pre>{latestSnapshot.repositories.map((repo) => `${shortPath(repo.path)}\nHEAD ${repo.head}\nTree ${repo.treeHash}\nDiff ${repo.diffHash}`).join("\n\n")}</pre>
+    </section>}
+    <section className="evidence-workbench">
+      <h3>产物与证据<span>{task.artifacts.length}</span></h3>
+      {!task.artifacts.length && <SmallEmpty>计划、审查报告、验收证据、交付记录与知识建议会显示在这里。</SmallEmpty>}
+      {[...task.artifacts].reverse().map((artifact) => <details className={`evidence-card ${artifact.kind}`} key={artifact.id}>
+        <summary><FileText size={13} /><strong>{artifact.title}</strong><time>{formatTime(artifact.createdAt)}</time></summary>
+        {artifact.content && <pre>{artifact.content}</pre>}
+        {Object.keys(artifact.metadata).length > 0 && <details className="evidence-metadata"><summary>结构化信息</summary><pre>{JSON.stringify(artifact.metadata, null, 2)}</pre></details>}
+      </details>)}
+    </section>
+    {(diff.data || diff.error) && <section className="diff-workbench">
+      <h3>代码与知识变更</h3>{diff.error && <ErrorBanner error={diff.error} />}
+      {diff.data?.map((repo) => <div className="repo-diff" key={repo.path}>
+        <header><span><GitBranch size={13} /><strong>{shortPath(repo.path)}</strong></span><span>{repo.files.length} 个文件 <b className="diff-additions">+{repo.additions}</b><b className="diff-deletions">−{repo.deletions}</b></span></header>
+        {!repo.files.length && <SmallEmpty>当前没有未提交的代码或知识变更。</SmallEmpty>}
+        {repo.files.map((file, index) => <DiffFileCard file={file} key={`${file.path}-${index}`} defaultOpen={repo.files.length <= 5} />)}
+      </div>)}
+    </section>}
   </div>;
 }
+
+const actionLabels: Partial<Record<TaskAction, string>> = {
+  generate_plan: "生成计划", revise_plan: "更新计划", accept_plan: "采纳计划", start_development: "开始开发",
+  request_changes: "打回修改", run_code_review: "代码审查", run_acceptance: "试运行与验收",
+  checkpoint_and_continue: "提交推送后继续修改", deliver: "提交并推送",
+  generate_knowledge_proposal: "生成知识建议", revise_knowledge_proposal: "修订知识建议",
+  accept_knowledge: "更新知识库", reject_knowledge: "不更新知识库", archive: "归档",
+};
 
 const diffStatusText: Record<CodeDiffFile["status"], string> = {
   added: "新增",
@@ -1032,38 +872,6 @@ function MaterialPreview({ materialId, onClose }: { materialId: string; onClose(
           {query.error && <ErrorBanner error={query.error} />}
           {query.data && <pre>{query.data.content || "（空文件）"}</pre>}
           {query.data?.truncated && <span className="preview-truncated">文件较大，仅展示前 256 KB。</span>}
-        </div>
-      </section>
-    </div>
-  );
-}
-
-function RequirementDocumentPreview({
-  artifact,
-  onClose,
-}: {
-  artifact: NonNullable<Task["workflow"]>["artifacts"][number];
-  onClose(): void;
-}) {
-  const sources = Array.isArray(artifact.metadata.sourceMaterials)
-    ? artifact.metadata.sourceMaterials as Array<{ name?: string }>
-    : [];
-  return (
-    <div className="dialog-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
-      <section className="dialog material-preview-dialog" role="dialog" aria-modal="true" aria-label="需求文档预览">
-        <header>
-          <div>
-            <span className="dialog-icon"><FileText size={18} /></span>
-            <div>
-              <h2>{artifact.title}</h2>
-              <p>只读预览 · 基于 {sources.length} 份需求材料</p>
-            </div>
-          </div>
-          <button className="icon-button" onClick={onClose} aria-label="关闭需求文档"><X size={17} /></button>
-        </header>
-        <div className="dialog-body material-preview-body requirement-preview-body">
-          <pre>{artifact.content || "（空文档）"}</pre>
-          {artifact.path && <code className="requirement-preview-path">{artifact.path}</code>}
         </div>
       </section>
     </div>
@@ -1201,51 +1009,25 @@ function Timeline({
   activities,
   interactions,
   sessions,
-  requirementArtifacts,
   onOpenWorkbench,
   running,
   hasMore,
   loading,
   onLoadOlder,
   onPreviewMaterial,
-  onPreviewRequirement,
 }: {
   events: AgentEvent[];
   activities: TaskActivity[];
   interactions: PendingInteraction[];
   sessions: Task["sessions"];
-  requirementArtifacts: NonNullable<Task["workflow"]>["artifacts"];
   onOpenWorkbench(): void;
   running: boolean;
   hasMore: boolean;
   loading: boolean;
   onLoadOlder(): Promise<void>;
   onPreviewMaterial(materialId: string): void;
-  onPreviewRequirement(artifactId: string): void;
 }) {
-  const recordedRequirementIds = new Set(
-    activities
-      .filter((activity) => activity.type === "requirement.generated")
-      .map((activity) => String(activity.payload.artifactId ?? "")),
-  );
-  const historicalRequirementActivities: TaskActivity[] = requirementArtifacts
-    .filter((artifact) => !recordedRequirementIds.has(artifact.id))
-    .map((artifact, index) => ({
-      id: -(index + 1),
-      taskId: artifact.taskId,
-      type: "requirement.generated",
-      payload: {
-        artifactId: artifact.id,
-        version: artifact.metadata.version,
-        title: artifact.title,
-        path: artifact.path,
-        sourceMaterialCount: Array.isArray(artifact.metadata.sourceMaterials)
-          ? artifact.metadata.sourceMaterials.length
-          : 0,
-      },
-      createdAt: artifact.createdAt,
-    }));
-  const items = buildTimelineItems(events, [...activities, ...historicalRequirementActivities], sessions);
+  const items = buildTimelineItems(events, activities, sessions);
   const pendingInteractions = interactions.filter((interaction) => interaction.status === "pending");
   const [collapseAllVersion, setCollapseAllVersion] = useState(0);
   const runCount = items.filter((item) => item.kind === "run").length;
@@ -1283,7 +1065,7 @@ function Timeline({
         <div className="thinking-row"><LoaderCircle className="spin" size={15} />Agent 正在启动</div>
       )}
       {items.map((item) => {
-        if (item.kind === "activity") return <ActivityTimelineEvent key={item.key} activity={item.activity} onPreviewMaterial={onPreviewMaterial} onPreviewRequirement={onPreviewRequirement} />;
+        if (item.kind === "activity") return <ActivityTimelineEvent key={item.key} activity={item.activity} onPreviewMaterial={onPreviewMaterial} />;
         if (item.kind === "run") return <AgentRunCard key={item.key} run={item.run} interactions={interactions} collapseAllVersion={collapseAllVersion} onPreviewMaterial={onPreviewMaterial} />;
         return <TimelineEvent key={item.key} event={item.event} />;
       })}
@@ -1297,25 +1079,43 @@ function Timeline({
   );
 }
 
-function ActivityTimelineEvent({ activity, onPreviewMaterial, onPreviewRequirement }: { activity: TaskActivity; onPreviewMaterial(materialId: string): void; onPreviewRequirement(artifactId: string): void }) {
+function ActivityTimelineEvent({ activity, onPreviewMaterial }: { activity: TaskActivity; onPreviewMaterial(materialId: string): void }) {
   const name = String(activity.payload.name ?? activity.payload.persistedAs ?? "需求说明");
-  const config = activity.type === "workflow.configured"
-    ? { icon: <Workflow size={14} />, title: "配置开发工作流", text: name, tone: "agent" }
-    : activity.type === "requirement.generated"
-      ? { icon: <FileText size={14} />, title: String(activity.payload.title ?? `需求规格 v${String(activity.payload.version ?? "")}`), text: `需求文档已生成 · 基于 ${String(activity.payload.sourceMaterialCount ?? 0)} 份材料 · 点击查看`, tone: "file" }
-    : activity.type === "review.approved"
-      ? { icon: <CheckCircle2 size={14} />, title: activity.payload.phase === "requirements" ? "需求规格已确认" : "人工审核通过", text: String(activity.payload.note ?? (activity.payload.phase === "requirements" ? "已进入开发阶段" : "审核通过")), tone: "success" }
+  const config = activity.type === "action.started"
+    ? { icon: <Workflow size={14} />, title: `开始：${String(activity.payload.label ?? activity.payload.type ?? "动作")}`, text: String(activity.payload.instruction ?? ""), tone: "agent" }
+    : activity.type === "action.completed"
+      ? { icon: <CheckCircle2 size={14} />, title: `完成：${String(activity.payload.label ?? activity.payload.type ?? "动作")}`, text: String(activity.payload.summary ?? ""), tone: "success" }
+    : activity.type === "action.failed"
+      ? { icon: <XCircle size={14} />, title: `失败：${String(activity.payload.label ?? activity.payload.type ?? "动作")}`, text: String(activity.payload.error ?? "请查看运行记录"), tone: "danger" }
+    : activity.type === "action.interrupted"
+      ? { icon: <CircleStop size={14} />, title: "动作已中断", text: "执行现场已保留，可重新选择下一步", tone: "warning" }
+    : activity.type === "plan.accepted"
+      ? { icon: <CheckCircle2 size={14} />, title: "计划已采纳", text: "现在可以开始开发，也可以继续调整计划", tone: "success" }
+    : activity.type === "knowledge.accepted"
+      ? { icon: <CheckCircle2 size={14} />, title: "知识库已更新", text: String(activity.payload.summary ?? "知识建议已经应用"), tone: "success" }
+    : activity.type === "knowledge.rejected"
+      ? { icon: <XCircle size={14} />, title: "知识建议未采纳", text: String(activity.payload.reason ?? "本次不更新知识库"), tone: "warning" }
+    : activity.type === "task.archived"
+      ? { icon: <CheckCircle2 size={14} />, title: "任务已归档", text: "开发、交付和知识处理均已结束", tone: "success" }
+    : activity.type === "delivery.preflight_started"
+      ? { icon: <GitBranch size={14} />, title: "开始交付预检", text: "正在检查代码是否已经提交并推送", tone: "agent" }
+    : activity.type === "delivery.preflight_completed"
+      ? { icon: <GitCompare size={14} />, title: "交付预检完成", text: activity.payload.action === "skip_all" ? "代码已在工作流外完成提交与推送" : activity.payload.action === "push_only" ? "检测到已有提交，只需继续推送" : "需要由开发 Agent 完成提交与推送", tone: activity.payload.action === "skip_all" ? "success" : "agent" }
+    : activity.type === "delivery.commit_skipped"
+      ? { icon: <CheckCircle2 size={14} />, title: "跳过创建提交", text: `检测到已有提交 ${String(activity.payload.commit ?? "")}`, tone: "success" }
+    : activity.type === "delivery.push_skipped"
+      ? { icon: <CheckCircle2 size={14} />, title: "跳过推送", text: `${String(activity.payload.remote ?? "origin")}/${String(activity.payload.branch ?? "")} 已包含 ${String(activity.payload.commit ?? "")}`, tone: "success" }
+    : activity.type === "delivery.agent_started"
+      ? { icon: <Send size={14} />, title: "开发 Agent 开始交付", text: "Agent 将自主处理提交、推送和普通 Git 问题", tone: "agent" }
+    : activity.type === "delivery.remote_verifying"
+      ? { icon: <GitCompare size={14} />, title: "正在确认远程分支", text: "检查远程 SHA、目标分支和未提交改动", tone: "agent" }
+    : activity.type === "delivery.completed"
+      ? { icon: <CheckCircle2 size={14} />, title: "代码交付完成", text: activity.payload.skipped ? "提交与推送此前已经完成，本次已自动跳过" : "本地提交与远程分支已经确认一致", tone: "success" }
+    : activity.type === "delivery.needs_user"
+      ? { icon: <CircleStop size={14} />, title: "代码交付已暂停", text: Array.isArray(activity.payload.problems) ? activity.payload.problems.map(String).join("\n") : "需要用户处理 Git 认证、权限、冲突或分支问题", tone: "warning" }
       : activity.type === "changes.requested"
         ? { icon: <RefreshCw size={14} />, title: activity.payload.automatic ? "验收未通过，已自动打回" : "审核打回修改", text: activity.payload.automatic ? String(activity.payload.feedback ?? "已自动要求修改").split("\n")[0] : String(activity.payload.feedback ?? "已要求修改"), tone: "warning" }
-        : activity.type === "workflow.interrupted"
-          ? { icon: <CircleStop size={14} />, title: "运行因服务退出而中断", text: "执行现场已经保存，AgentDesk 重启后会自动尝试恢复", tone: "warning" }
-          : activity.type === "workflow.recovered"
-            ? { icon: <RefreshCw size={14} />, title: "未完成工作已自动恢复", text: activity.payload.strategy === "replay_terminal_event" ? "已重放退出前完成的结果并继续工作流" : activity.payload.strategy === "restart_quality_check" ? "已重新启动独立审查或验收" : "已恢复 Agent 会话并继续当前节点", tone: "success" }
-            : activity.type === "workflow.recovery_failed"
-              ? { icon: <XCircle size={14} />, title: "自动恢复失败", text: String(activity.payload.error ?? "请人工检查后重新开始当前节点"), tone: "danger" }
-        : activity.type === "workflow.discarded"
-          ? { icon: <Trash2 size={14} />, title: "放弃开发结果", text: "已回退到开发前检查点，原修改保存在 Git stash", tone: "danger" }
-          : activity.type === "repository.added"
+        : activity.type === "repository.added"
             ? { icon: <FolderGit2 size={14} />, title: "关联新的代码仓库", text: `${String(activity.payload.sourcePath ?? "")}${activity.payload.taskBranch ? `\n任务分支：${String(activity.payload.taskBranch)}` : ""}`, tone: "file" }
           : activity.type === "material.removed"
     ? { icon: <Trash2 size={14} />, title: "移除需求材料", text: name, tone: "danger" }
@@ -1329,11 +1129,7 @@ function ActivityTimelineEvent({ activity, onPreviewMaterial, onPreviewRequireme
       <div className="event-rail"><span>{config.icon}</span></div>
       <div className="event-body">
         <header><strong>{config.title}</strong><time>{formatTime(activity.createdAt)}</time></header>
-        {activity.type === "requirement.generated" && activity.payload.artifactId ? (
-          <button className="activity-material-link" onClick={() => onPreviewRequirement(String(activity.payload.artifactId))}>
-            {config.text}
-          </button>
-        ) : activity.payload.materialId ? (
+        {activity.payload.materialId ? (
           <button className="activity-material-link" onClick={() => onPreviewMaterial(String(activity.payload.materialId))}>
             {config.text}
           </button>
@@ -1960,24 +1756,16 @@ function NewTaskDialog({
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [provider, setProvider] = useState<AgentProvider>("codex");
-  const templates = useQuery({ queryKey: ["workflow-templates"], queryFn: api.workflowTemplates });
   const collections = useQuery({ queryKey: ["task-collections"], queryFn: api.collections });
   const registeredRepositories = useQuery({ queryKey: ["registered-repositories"], queryFn: api.registeredRepositories });
   const [tagsText, setTagsText] = useState("");
   const [collectionId, setCollectionId] = useState("");
-  const [templateId, setTemplateId] = useState("requirements");
-  const [customizeWorkflow, setCustomizeWorkflow] = useState(false);
-  const [requirementDefinition, setRequirementDefinition] = useState(true);
-  const [agentReview, setAgentReview] = useState(false);
-  const [agentAcceptance, setAgentAcceptance] = useState(false);
-  const [humanReview, setHumanReview] = useState(false);
   const [acceptanceCriteria, setAcceptanceCriteria] = useState("");
+  const [deliveryTarget, setDeliveryTarget] = useState("");
   const [requirement, setRequirement] = useState("");
   const [selectedRepositoryIds, setSelectedRepositoryIds] = useState<string[]>([]);
   const [repositories, setRepositories] = useState<TaskRepositoryInput[]>([]);
   const [files, setFiles] = useState<File[]>([]);
-  const complexCustomWorkflow = agentReview || agentAcceptance || humanReview;
-  const includeRequirementDefinition = requirementDefinition || complexCustomWorkflow;
   const create = useMutation({
     mutationFn: async (input: CreateTaskInput) => {
       const task = await api.createTask(input);
@@ -2004,24 +1792,8 @@ function NewTaskDialog({
       source: { type: "manual", label: "直接创建" },
       tags: tagsText.split(/[,，]/).map((tag) => tag.trim()).filter(Boolean),
       collectionId: collectionId || undefined,
-      workflow: {
-        templateId,
-        acceptanceCriteria,
-        nodes: customizeWorkflow
-          ? [
-              ...(includeRequirementDefinition ? [
-                { id: "requirement-analysis", kind: "requirement_analysis" as const, name: "需求分析" },
-                { id: "requirement-approval", kind: "human_requirement_approval" as const, name: "人工确认需求" },
-              ] : []),
-              { id: "development", kind: "development", name: "开发实现" },
-              ...(agentReview ? [{ id: "agent-review", kind: "agent_review" as const, name: "Agent Code Review" }] : []),
-              ...(agentAcceptance ? [{ id: "agent-acceptance", kind: "agent_acceptance" as const, name: "Agent 目标验收" }] : []),
-              { id: "knowledge-review", kind: "knowledge_review" as const, name: "需求知识审查" },
-              ...(humanReview ? [{ id: "human-review", kind: "human_review" as const, name: "人工审核" }] : []),
-              { id: "commit", kind: "commit", name: "本地提交" },
-            ]
-          : undefined,
-      },
+      acceptanceCriteria: acceptanceCriteria.trim() || undefined,
+      deliveryTarget: deliveryTarget.trim() || undefined,
     });
   };
 
@@ -2058,37 +1830,14 @@ function NewTaskDialog({
               ))}
             </div>
           </fieldset>
-          <fieldset className="field workflow-template-field">
-            <legend>开发工作流</legend>
-            <div className="workflow-template-options">
-              {templates.data?.map((template) => (
-                <label className={templateId === template.id && !customizeWorkflow ? "selected" : ""} key={template.id}>
-                  <input type="radio" name="workflow-template" checked={templateId === template.id && !customizeWorkflow} onChange={() => { setTemplateId(template.id); setCustomizeWorkflow(false); }} />
-                  <Workflow size={16} />
-                  <span><strong>{template.name}</strong><small>{template.description}</small></span>
-                </label>
-              ))}
-              <label className={customizeWorkflow ? "selected" : ""}>
-                <input type="radio" name="workflow-template" checked={customizeWorkflow} onChange={() => setCustomizeWorkflow(true)} />
-                <Settings2 size={16} />
-                <span><strong>自定义</strong><small>自由组合 Review、验收和人工门禁</small></span>
-              </label>
-            </div>
-            {customizeWorkflow && (
-              <div className="workflow-custom-options">
-                <label title={complexCustomWorkflow ? "包含审查或验收的复杂流程必须先确认需求基线" : undefined}><input type="checkbox" checked={includeRequirementDefinition} disabled={complexCustomWorkflow} onChange={(event) => setRequirementDefinition(event.target.checked)} />需求分析与人工确认{complexCustomWorkflow ? "（复杂流程必选）" : ""}</label>
-                <label><input type="checkbox" checked={agentReview} onChange={(event) => setAgentReview(event.target.checked)} />独立 Agent Code Review</label>
-                <label><input type="checkbox" checked={agentAcceptance} onChange={(event) => setAgentAcceptance(event.target.checked)} />独立 Agent 目标验收</label>
-                <label><input type="checkbox" checked={humanReview} onChange={(event) => setHumanReview(event.target.checked)} />人工审核门禁</label>
-              </div>
-            )}
-          </fieldset>
-          {(templateId === "acceptance" || agentAcceptance) && (
-            <label className="field">
-              <span>验收目标</span>
-              <textarea value={acceptanceCriteria} onChange={(event) => setAcceptanceCriteria(event.target.value)} rows={4} placeholder="例如：加减法结果正确；页面可在移动端使用；自动化测试全部通过，并提供测试输出。" />
-            </label>
-          )}
+          <label className="field">
+            <span>交付目标（可选）</span>
+            <textarea value={deliveryTarget} onChange={(event) => setDeliveryTarget(event.target.value)} rows={2} placeholder="例如：完成退款链路改造并推送到任务分支。" />
+          </label>
+          <label className="field">
+            <span>验收标准（可选）</span>
+            <textarea value={acceptanceCriteria} onChange={(event) => setAcceptanceCriteria(event.target.value)} rows={3} placeholder="例如：自动化测试通过；移动端可用；展示关键运行证据。" />
+          </label>
           <label className="field">
             <span>需求说明</span>
             <textarea value={requirement} onChange={(event) => setRequirement(event.target.value)} placeholder="粘贴 PRD、会议结论、验收条件或其他上下文…" rows={5} />

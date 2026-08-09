@@ -35,7 +35,7 @@ export class Orchestrator {
     const task = this.store.getTask(taskId);
     if (!task) throw new Error("任务不存在");
     if (!task.workspacePath) throw new Error("请先准备工作区");
-    if (task.status === "running" || task.status === "waiting_user") {
+    if (task.sessions.some((session) => ["starting", "running", "waiting_user"].includes(session.status))) {
       throw new Error("任务已有正在运行的 Agent");
     }
     const adapter = this.adapters.get(task.provider);
@@ -188,13 +188,26 @@ export class Orchestrator {
             .map((material) => `- materials/${material.name}`)
             .join("\n")
         : "- 暂无";
-    const executionRequirements = mode === "development"
+    const executionRequirements = mode === "planning"
+      ? `1. 当前阶段只生成或修改开发计划，不得修改业务文件或 Git 状态。
+2. 完整阅读需求材料和关联仓库，计划应包含影响范围、实施步骤、测试方案、风险和待确认事项。
+3. 缺失信息会实质改变计划时，使用 AgentDesk 用户提问工具。
+4. 最终只返回完整、可供用户采纳的计划。`
+      : mode === "delivery"
+      ? `1. 当前阶段只负责完成 Git 提交和推送，不重新实现需求或主动修改已经审核通过的业务行为。
+2. 先检查每个指定仓库的工作区、当前分支、remote 和上游状态；如果提交或推送已经在工作流外完成，直接确认并报告，不要重复操作。
+3. 普通 Git 问题应自行分析和解决，包括设置 upstream、fetch、无冲突 rebase、调整提交说明以及有限次数重试临时网络错误。
+4. 禁止 force push、删除远程分支或标签、修改 remote URL、修改 Git 全局配置、绕过 hooks、输出凭据，或推送到框架指定之外的分支。
+5. 如果需要身份认证、权限授权、冲突取舍、受保护分支处理，或者解决问题必须改变已经确认的业务内容，立即停止并清楚说明需要用户处理的事项。
+6. 完成后报告每个仓库的本地 commit SHA、远程名称、远程分支、push 结果以及剩余未提交文件。`
+      : mode === "development"
       ? `1. 先阅读 AGENTS.md 和 materials 目录。
 2. 先分析影响范围，再实施修改。
 3. 缺失信息会实质改变实现方案时，必须使用 AgentDesk 用户提问工具。
 4. 不要访问或修改任务工作区以外的文件。
 5. 修改后运行相关测试。
-6. 最后总结变更、测试结果、风险和遗留事项。`
+6. 最后总结变更、测试结果、风险和遗留事项。
+7. 开发阶段禁止提交或推送代码，等待用户明确选择交付动作。`
       : mode === "requirements"
         ? `1. 阅读 AGENTS.md、任务描述以及 materials 目录中的每一份材料。
 2. 当前是独立需求分析任务，不得修改业务代码、原始材料或仓库状态。
@@ -203,7 +216,7 @@ export class Orchestrator {
 5. 不要访问任务工作区以外的文件。
 6. 最终只返回一份完整、可追踪、可供人工确认的 Markdown 需求规格。`
         : mode === "knowledge"
-          ? `1. 先阅读 AGENTS.md 和本轮指定的知识审查证据包，并逐一核对其中列出的原始材料、需求规格、用户补充、审查报告和代码 Diff。
+          ? `1. 先阅读 AGENTS.md 和本轮指定的需求总结证据包，并逐一核对其中列出的原始材料、需求规格、用户补充、审查报告和代码 Diff。
 2. 只允许修改各代码仓库的 knowledge/ 目录；不得修改业务代码、测试、配置、原始材料或 generated 证据包。
 3. 按主题更新已有 Wiki 页面，避免为每个需求机械新增一篇孤立总结。
 4. 每条稳定知识必须写明来源、适用范围、状态和最后验证日期；证据不足的内容只能标为 candidate。
@@ -214,7 +227,7 @@ export class Orchestrator {
 3. 可以运行不会改变业务代码的检查和测试命令。
 4. 不要访问任务工作区以外的文件。
 5. 结论必须基于可复现的证据；无法验证时明确说明原因，不要猜测。`;
-    return `你正在 AgentDesk 任务工作区内执行一个${mode === "development" ? "开发" : mode === "knowledge" ? "独立知识审查" : "独立分析"}任务。
+    return `你正在 AgentDesk 任务工作区内执行一个${mode === "planning" ? "开发计划" : mode === "development" ? "开发" : mode === "delivery" ? "代码交付" : mode === "knowledge" ? "独立需求总结" : "独立分析"}任务。
 
 # 任务
 

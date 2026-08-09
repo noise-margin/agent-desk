@@ -18,17 +18,14 @@ export interface TaskCollection {
 export type TaskStatus =
   | "draft"
   | "preparing"
-  | "defining_requirements"
-  | "pending_requirement_confirmation"
   | "ready"
-  | "running"
+  | "working"
   | "waiting_user"
-  | "pending_review"
-  | "changes_requested"
-  | "verifying"
-  | "approved"
-  | "discarded"
-  | "completed"
+  | "delivering"
+  | "delivered"
+  | "knowledge_pending"
+  | "closed"
+  | "archived"
   | "interrupted"
   | "failed"
   | "cancelled";
@@ -78,14 +75,23 @@ export type TaskActivityType =
   | "material.restored"
   | "repository.added"
   | "user.followup"
-  | "workflow.configured"
-  | "requirement.generated"
-  | "review.approved"
+  | "action.started"
+  | "action.completed"
+  | "action.failed"
+  | "action.interrupted"
+  | "plan.accepted"
   | "changes.requested"
-  | "workflow.interrupted"
-  | "workflow.recovered"
-  | "workflow.recovery_failed"
-  | "workflow.discarded";
+  | "knowledge.accepted"
+  | "knowledge.rejected"
+  | "task.archived"
+  | "delivery.preflight_started"
+  | "delivery.preflight_completed"
+  | "delivery.commit_skipped"
+  | "delivery.push_skipped"
+  | "delivery.agent_started"
+  | "delivery.remote_verifying"
+  | "delivery.completed"
+  | "delivery.needs_user";
 
 export interface TaskActivity {
   id: number;
@@ -95,54 +101,52 @@ export interface TaskActivity {
   createdAt: string;
 }
 
-export type WorkflowNodeKind =
-  | "requirement_analysis"
-  | "human_requirement_approval"
-  | "development"
-  | "agent_review"
-  | "agent_acceptance"
-  | "knowledge_review"
-  | "human_review"
-  | "commit";
+export type TaskAction =
+  | "generate_plan"
+  | "revise_plan"
+  | "accept_plan"
+  | "start_development"
+  | "request_changes"
+  | "run_code_review"
+  | "run_acceptance"
+  | "checkpoint_and_continue"
+  | "deliver"
+  | "generate_knowledge_proposal"
+  | "revise_knowledge_proposal"
+  | "accept_knowledge"
+  | "reject_knowledge"
+  | "archive";
 
-export type WorkflowNodeStatus =
+export type ActionRunStatus =
   | "pending"
   | "running"
   | "waiting_user"
   | "succeeded"
   | "failed"
-  | "changes_requested"
   | "interrupted"
-  | "skipped";
+  | "cancelled";
 
-export interface WorkflowNodeDefinition {
+export interface ActionRun {
   id: string;
-  kind: WorkflowNodeKind;
-  name: string;
-  prompt?: string;
-}
-
-export interface WorkflowTemplate {
-  id: string;
-  name: string;
-  description: string;
-  nodes: WorkflowNodeDefinition[];
-}
-
-export interface WorkflowNodeRun extends WorkflowNodeDefinition {
-  status: WorkflowNodeStatus;
-  attempt: number;
+  taskId: string;
+  type: TaskAction;
+  status: ActionRunStatus;
+  input: Record<string, unknown>;
+  output: Record<string, unknown>;
+  snapshotId?: string;
   sessionId?: string;
   startedAt?: string;
   completedAt?: string;
-  output?: Record<string, unknown>;
+  createdAt: string;
 }
 
-export interface WorkflowArtifact {
+export type ActionArtifactKind = "plan" | "development" | "review" | "acceptance" | "delivery" | "knowledge" | "feedback" | "test";
+
+export interface ActionArtifact {
   id: string;
   taskId: string;
-  nodeId: string;
-  kind: "requirement" | "review" | "acceptance" | "knowledge" | "test" | "diff" | "feedback" | "checkpoint" | "commit";
+  actionRunId: string;
+  kind: ActionArtifactKind;
   title: string;
   content?: string;
   path?: string;
@@ -150,18 +154,27 @@ export interface WorkflowArtifact {
   createdAt: string;
 }
 
-export interface WorkflowRun {
+export interface CodeSnapshotRepository {
+  repositoryId?: string;
+  path: string;
+  head: string;
+  treeHash: string;
+  diffHash: string;
+}
+
+export interface CodeSnapshot {
   id: string;
   taskId: string;
-  templateId: string;
-  name: string;
-  status: "idle" | "running" | "waiting_user" | "changes_requested" | "interrupted" | "completed" | "failed";
-  currentNodeId?: string;
-  acceptanceCriteria?: string;
-  nodes: WorkflowNodeRun[];
-  artifacts: WorkflowArtifact[];
+  repositories: CodeSnapshotRepository[];
   createdAt: string;
-  updatedAt: string;
+}
+
+export interface AvailableAction {
+  type: TaskAction;
+  label: string;
+  description: string;
+  tone?: "primary" | "normal" | "danger";
+  requiresInstruction?: boolean;
 }
 
 export type CodeDiffFileStatus = "added" | "modified" | "deleted" | "renamed" | "copied" | "unmerged" | "unknown";
@@ -320,7 +333,11 @@ export interface Task {
   sessions: AgentSession[];
   interactions: PendingInteraction[];
   activities: TaskActivity[];
-  workflow?: WorkflowRun;
+  actions: ActionRun[];
+  artifacts: ActionArtifact[];
+  snapshots: CodeSnapshot[];
+  acceptanceCriteria?: string;
+  deliveryTarget?: string;
 }
 
 export interface CreateTaskInput {
@@ -332,16 +349,20 @@ export interface CreateTaskInput {
   source?: TaskSource;
   tags?: string[];
   collectionId?: string;
-  workflow?: {
-    templateId: string;
-    nodes?: WorkflowNodeDefinition[];
-    acceptanceCriteria?: string;
-  };
+  acceptanceCriteria?: string;
+  deliveryTarget?: string;
+}
+
+export interface ExecuteActionInput {
+  type: TaskAction;
+  instruction?: string;
+  feedback?: string;
+  artifactId?: string;
 }
 
 export interface StartRunInput {
   prompt: string;
-  mode?: "requirements" | "development" | "review" | "acceptance" | "knowledge";
+  mode?: "planning" | "requirements" | "development" | "review" | "acceptance" | "knowledge" | "delivery";
 }
 
 export interface FollowUpInput {

@@ -67,7 +67,6 @@ export class CodexAdapter implements AgentAdapter {
     runtime.input = input;
     runtime.turnId = undefined;
     this.store.updateSession(input.sessionId, { status: "running" });
-    this.store.updateTask(input.taskId, { status: "running" });
     this.events.publish(input.taskId, input.sessionId, "session.resumed", {
       provider: "codex",
       providerSessionId,
@@ -102,7 +101,8 @@ export class CodexAdapter implements AgentAdapter {
     child.on("exit", (code, signal) => {
       if (this.runtimes.get(input.sessionId) === runtime) {
         this.runtimes.delete(input.sessionId);
-        if (code !== 0 && this.store.getTask(input.taskId)?.status === "running") {
+        const sessionStatus = this.store.getTask(input.taskId)?.sessions.find((session) => session.id === input.sessionId)?.status;
+        if (code !== 0 && sessionStatus && ["starting", "running", "waiting_user"].includes(sessionStatus)) {
           this.fail(runtime, new Error(`Codex App Server exited (${code ?? signal})`));
         }
       }
@@ -139,7 +139,6 @@ export class CodexAdapter implements AgentAdapter {
       providerSessionId: threadId,
       status: "running",
     });
-    this.store.updateTask(input.taskId, { status: "running" });
     this.events.publish(
       input.taskId,
       input.sessionId,
@@ -231,7 +230,6 @@ export class CodexAdapter implements AgentAdapter {
           : "declined",
     );
     this.store.updateSession(interaction.sessionId, { status: "running" });
-    this.store.updateTask(interaction.taskId, { status: "running" });
     this.events.publish(interaction.taskId, interaction.sessionId, "interaction.resolved", {
       interactionId,
       action: response.action,
@@ -341,7 +339,6 @@ export class CodexAdapter implements AgentAdapter {
     });
     runtime.interactions.set(interaction.id, request.id);
     this.store.updateSession(runtime.input.sessionId, { status: "waiting_user" });
-    this.store.updateTask(runtime.input.taskId, { status: "waiting_user" });
     this.events.publish(runtime.input.taskId, runtime.input.sessionId, "interaction.requested", {
       interaction,
     });
@@ -393,9 +390,6 @@ export class CodexAdapter implements AgentAdapter {
       const status = String(turn.status ?? "completed");
       const failed = status === "failed";
       this.store.updateSession(runtime.input.sessionId, {
-        status: failed ? "failed" : "completed",
-      });
-      this.store.updateTask(runtime.input.taskId, {
         status: failed ? "failed" : "completed",
       });
       this.events.publish(

@@ -86,7 +86,6 @@ export class QwenCodeAdapter implements AgentAdapter {
     const runtime: Runtime = { input, child, interrupted: false };
     this.runtimes.set(input.sessionId, runtime);
     this.store.updateSession(input.sessionId, { status: "running" });
-    this.store.updateTask(input.taskId, { status: "running" });
     this.events.publish(
       input.taskId,
       input.sessionId,
@@ -136,13 +135,11 @@ export class QwenCodeAdapter implements AgentAdapter {
         );
       }
       this.store.updateSession(input.sessionId, { status: "completed" });
-      this.store.updateTask(input.taskId, { status: "completed" });
       this.events.publish(input.taskId, input.sessionId, "turn.completed", {});
     } catch (error) {
       if (runtime.interrupted) return;
       const message = error instanceof Error ? error.message : String(error);
       this.store.updateSession(input.sessionId, { status: "failed" });
-      this.store.updateTask(input.taskId, { status: "failed" });
       this.events.publish(input.taskId, input.sessionId, "turn.failed", { error: message });
     } finally {
       this.runtimes.delete(input.sessionId);
