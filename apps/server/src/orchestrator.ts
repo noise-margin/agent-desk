@@ -188,6 +188,9 @@ export class Orchestrator {
             .map((material) => `- materials/${material.name}`)
             .join("\n")
         : "- 暂无";
+    const knowledgeRepositories = task.knowledgeRepositories.length
+      ? task.knowledgeRepositories.map((repo) => `- ${repo.name}: ${repo.worktreePath ?? repo.sourcePath}`).join("\n")
+      : "- 未关联知识库";
     const executionRequirements = mode === "planning"
       ? `1. 当前阶段只生成或修改开发计划，不得修改业务文件或 Git 状态。
 2. 完整阅读需求材料和关联仓库，计划应包含影响范围、实施步骤、测试方案、风险和待确认事项。
@@ -217,7 +220,7 @@ export class Orchestrator {
 6. 最终只返回一份完整、可追踪、可供人工确认的 Markdown 需求规格。`
         : mode === "knowledge"
           ? `1. 先阅读 AGENTS.md 和本轮指定的需求总结证据包，并逐一核对其中列出的原始材料、需求规格、用户补充、审查报告和代码 Diff。
-2. 只允许修改各代码仓库的 knowledge/ 目录；不得修改业务代码、测试、配置、原始材料或 generated 证据包。
+2. 只允许修改本任务关联的独立知识库 worktree；不得修改业务代码仓库、测试、配置、原始材料或 generated 证据包。
 3. 按主题更新已有 Wiki 页面，避免为每个需求机械新增一篇孤立总结。
 4. 每条稳定知识必须写明来源、适用范围、状态和最后验证日期；证据不足的内容只能标为 candidate。
 5. 检查重复、冲突、断链、过期规则和孤立页面；无法确认时保留冲突并明确待确认事项。
@@ -242,6 +245,10 @@ ${repositories}
 # 需求材料
 
 ${materials}
+
+# 关联知识库
+
+${knowledgeRepositories}
 
 # 本轮指令
 

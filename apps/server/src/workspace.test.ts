@@ -26,11 +26,23 @@ describe("WorkspaceService", () => {
     execFileSync("git", ["-C", repositoryPath, "commit", "-m", "initial"]);
     const baseBranch = execFileSync("git", ["-C", repositoryPath, "branch", "--show-current"], { encoding: "utf8" }).trim();
 
+    const knowledgePath = path.join(root, "product-knowledge");
+    fs.mkdirSync(knowledgePath);
+    execFileSync("git", ["init", knowledgePath]);
+    execFileSync("git", ["-C", knowledgePath, "config", "user.email", "agentdesk@local"]);
+    execFileSync("git", ["-C", knowledgePath, "config", "user.name", "AgentDesk Test"]);
+    fs.writeFileSync(path.join(knowledgePath, "index.md"), "# knowledge\n");
+    execFileSync("git", ["-C", knowledgePath, "add", "index.md"]);
+    execFileSync("git", ["-C", knowledgePath, "commit", "-m", "initial"]);
+    const knowledgeBranch = execFileSync("git", ["-C", knowledgePath, "branch", "--show-current"], { encoding: "utf8" }).trim();
+
     const store = new Store(path.join(root, "agentdesk.db"));
+    const knowledge = store.createKnowledgeRepository({ name: "Product knowledge", sourcePath: knowledgePath, defaultBranch: knowledgeBranch });
     const task = store.createTask({
       title: "worktree task",
       provider: "codex",
       repositories: [{ sourcePath: repositoryPath, baseBranch }],
+      knowledgeRepositoryIds: [knowledge.id],
     });
     const service = new WorkspaceService(store, path.join(root, "workspaces"));
     const prepared = await service.prepare(task.id);
@@ -41,6 +53,8 @@ describe("WorkspaceService", () => {
     expect(linkedRepository.worktreePath).toBeTruthy();
     expect(fs.existsSync(path.join(linkedRepository.worktreePath!, "README.md"))).toBe(true);
     expect(execFileSync("git", ["-C", linkedRepository.worktreePath!, "branch", "--show-current"], { encoding: "utf8" }).trim()).toBe(linkedRepository.taskBranch);
+    expect(prepared.knowledgeRepositories[0]?.taskBranch).toMatch(/^agentdesk\/knowledge-worktree-task-/);
+    expect(fs.existsSync(path.join(prepared.knowledgeRepositories[0]!.worktreePath!, "index.md"))).toBe(true);
 
     const runtimeRepositoryPath = path.join(root, "payment-service");
     fs.mkdirSync(runtimeRepositoryPath);

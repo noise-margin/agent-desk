@@ -6,6 +6,7 @@ import { ActionEngine } from "./action-engine.js";
 import { EventBus } from "./event-bus.js";
 import type { Orchestrator } from "./orchestrator.js";
 import { Store } from "./store.js";
+import type { KnowledgeRetrievalService } from "./knowledge-retrieval.js";
 
 const tempDirs: string[] = [];
 
@@ -86,6 +87,26 @@ describe("ActionEngine", () => {
 
     expect(store.getTask(task.id)?.actions.at(-1)?.status).toBe("failed");
     expect(engine.availableActions(task.id).map((item) => item.type)).toEqual(["generate_plan", "start_development"]);
+    store.close();
+  });
+
+  it("runs a bounded retrieval action before coding when a knowledge repository is associated", async () => {
+    const { store, events, start } = setup();
+    const repository = store.createKnowledgeRepository({ name: "Product", sourcePath: "E:/knowledge/product", defaultBranch: "main" });
+    const task = store.createTask({ title: "order lifecycle", provider: "codex", repositories: [], knowledgeRepositoryIds: [repository.id] });
+    const retrieval = {
+      collect: vi.fn(async () => ({ query: "order lifecycle", keywords: ["order"], candidates: [{
+        knowledgeRepositoryId: repository.id, repositoryName: "Product", path: "wiki/order.md",
+        absolutePath: "E:/knowledge/product/wiki/order.md", anchor: "Close order", excerpt: "Closed orders cannot be restored.", score: 10, matchedKeywords: ["order"],
+      }] })),
+    } as unknown as KnowledgeRetrievalService;
+    const engine = new ActionEngine(store, events, { start, interrupt: vi.fn() } as unknown as Orchestrator, retrieval);
+
+    await engine.execute(task.id, { type: "start_development" });
+
+    expect(retrieval.collect).toHaveBeenCalledOnce();
+    expect(store.getTask(task.id)?.actions.at(-1)).toMatchObject({ type: "retrieve_knowledge", status: "running" });
+    expect(start).toHaveBeenLastCalledWith(task.id, expect.objectContaining({ mode: "review", prompt: expect.stringContaining("wiki/order.md") }));
     store.close();
   });
 });

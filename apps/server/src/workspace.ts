@@ -56,11 +56,13 @@ export class WorkspaceService {
     const workspacePath = path.resolve(this.workspacesDir, taskSlug);
     const materialsPath = path.join(workspacePath, "materials");
     const reposPath = path.join(workspacePath, "repos");
+    const knowledgePath = path.join(workspacePath, "knowledge");
     const artifactsPath = path.join(workspacePath, "artifacts");
     const logsPath = path.join(workspacePath, "logs");
 
     await fs.mkdir(materialsPath, { recursive: true });
     await fs.mkdir(reposPath, { recursive: true });
+    await fs.mkdir(knowledgePath, { recursive: true });
     await fs.mkdir(artifactsPath, { recursive: true });
     await fs.mkdir(logsPath, { recursive: true });
 
@@ -75,6 +77,10 @@ export class WorkspaceService {
     const usedNames = new Set<string>();
     for (const repo of task.repositories) {
       await this.prepareRepository(task, repo, reposPath, usedNames);
+    }
+    const usedKnowledgeNames = new Set<string>();
+    for (const repository of task.knowledgeRepositories) {
+      await this.prepareKnowledgeRepository(task, repository, knowledgePath, usedKnowledgeNames);
     }
 
     this.store.updateTask(taskId, { workspacePath, status: "ready" });
@@ -101,6 +107,22 @@ export class WorkspaceService {
       .filter((candidate) => candidate.id !== repositoryId && candidate.worktreePath)
       .map((candidate) => path.basename(candidate.worktreePath!)));
     await this.prepareRepository(task, repository, reposPath, usedNames);
+    const prepared = this.store.getTask(taskId)!;
+    await fs.writeFile(path.join(task.workspacePath, "task.yaml"), this.taskYaml(prepared), "utf8");
+    await fs.writeFile(path.join(task.workspacePath, "AGENTS.md"), this.agentInstructions(prepared), "utf8");
+    return prepared;
+  }
+
+  async attachKnowledgeRepository(taskId: string, taskKnowledgeRepositoryId: string): Promise<Task> {
+    const task = this.store.getTask(taskId);
+    if (!task) throw new Error("任务不存在");
+    const repository = task.knowledgeRepositories.find((item) => item.id === taskKnowledgeRepositoryId);
+    if (!repository) throw new Error("任务知识库不存在");
+    if (!task.workspacePath) return task;
+    const knowledgePath = path.join(task.workspacePath, "knowledge");
+    await fs.mkdir(knowledgePath, { recursive: true });
+    const usedNames = new Set(task.knowledgeRepositories.filter((item) => item.id !== repository.id && item.worktreePath).map((item) => path.basename(item.worktreePath!)));
+    await this.prepareKnowledgeRepository(task, repository, knowledgePath, usedNames);
     const prepared = this.store.getTask(taskId)!;
     await fs.writeFile(path.join(task.workspacePath, "task.yaml"), this.taskYaml(prepared), "utf8");
     await fs.writeFile(path.join(task.workspacePath, "AGENTS.md"), this.agentInstructions(prepared), "utf8");
@@ -143,6 +165,33 @@ export class WorkspaceService {
     this.store.updateRepository(repository.id, { baseBranch, worktreePath, taskBranch, baseCommit });
   }
 
+  private async prepareKnowledgeRepository(
+    task: Task,
+    repository: Task["knowledgeRepositories"][number],
+    knowledgePath: string,
+    usedNames: Set<string>,
+  ) {
+    const inspected = await this.inspectRepository(repository.sourcePath, repository.defaultBranch);
+    let name = repoName(inspected.sourcePath);
+    let suffix = 2;
+    while (usedNames.has(name)) name = `${repoName(inspected.sourcePath)}-${suffix++}`;
+    usedNames.add(name);
+    const { stdout } = await execFileAsync("git", ["-C", inspected.sourcePath, "rev-parse", inspected.defaultBranch]);
+    const baseCommit = stdout.trim();
+    const taskBranch = `agentdesk/knowledge-${slug(task.title)}-${task.id.slice(0, 8)}`;
+    const worktreePath = path.join(knowledgePath, name);
+    try {
+      await fs.access(worktreePath);
+    } catch {
+      const exists = (await execFileAsync("git", ["-C", inspected.sourcePath, "branch", "--list", taskBranch])).stdout.trim();
+      await execFileAsync("git", exists
+        ? ["-C", inspected.sourcePath, "worktree", "add", worktreePath, taskBranch]
+        : ["-C", inspected.sourcePath, "worktree", "add", "-b", taskBranch, worktreePath, inspected.defaultBranch],
+      { timeout: 60_000 });
+    }
+    this.store.updateTaskKnowledgeRepository(repository.id, { worktreePath, taskBranch, baseCommit });
+  }
+
   private taskYaml(task: Task) {
     return [
       `id: ${yamlString(task.id)}`,
@@ -156,6 +205,14 @@ export class WorkspaceService {
         `    baseBranch: ${yamlString(repo.baseBranch ?? "")}`,
         `    taskBranch: ${yamlString(repo.taskBranch ?? "")}`,
         `    baseCommit: ${yamlString(repo.baseCommit ?? "")}`,
+      ]),
+      "knowledgeRepositories:",
+      ...task.knowledgeRepositories.flatMap((repo) => [
+        `  - name: ${yamlString(repo.name)}`,
+        `    source: ${yamlString(repo.sourcePath)}`,
+        `    worktree: ${yamlString(repo.worktreePath ?? "")}`,
+        `    defaultBranch: ${yamlString(repo.defaultBranch)}`,
+        `    taskBranch: ${yamlString(repo.taskBranch ?? "")}`,
       ]),
       "",
     ].join("\n");

@@ -6,10 +6,12 @@ import type {
   CreateTaskInput,
   ExecuteActionInput,
   HealthResponse,
+  KnowledgeRepository,
   Material,
   RegisteredRepository,
   ResolveInteractionInput,
   SaveRegisteredRepositoryInput,
+  SaveKnowledgeRepositoryInput,
   RepositoryDiff,
   Task,
   TaskCollection,
@@ -39,6 +41,11 @@ export const api = {
   tasks: () => request<Task[]>("/api/tasks"),
   collections: () => request<TaskCollection[]>("/api/task-collections"),
   registeredRepositories: () => request<RegisteredRepository[]>("/api/registered-repositories"),
+  knowledgeRepositories: () => request<KnowledgeRepository[]>("/api/knowledge-repositories"),
+  createKnowledgeRepository: (input: SaveKnowledgeRepositoryInput) =>
+    request<KnowledgeRepository>("/api/knowledge-repositories", { method: "POST", body: JSON.stringify(input) }),
+  deleteKnowledgeRepository: (id: string) =>
+    request<{ ok: true }>(`/api/knowledge-repositories/${id}`, { method: "DELETE" }),
   createRegisteredRepository: (input: SaveRegisteredRepositoryInput) =>
     request<RegisteredRepository>("/api/registered-repositories", { method: "POST", body: JSON.stringify(input) }),
   deleteRegisteredRepository: (id: string) =>
@@ -79,6 +86,11 @@ export const api = {
     request<{ task: Task; repository: Task["repositories"][number]; agentNotified: boolean }>(`/api/tasks/${taskId}/repositories`, {
       method: "POST",
       body: JSON.stringify(input),
+    }),
+  addTaskKnowledgeRepository: (taskId: string, knowledgeRepositoryId: string) =>
+    request<{ task: Task; knowledgeRepository: Task["knowledgeRepositories"][number] }>(`/api/tasks/${taskId}/knowledge-repositories`, {
+      method: "POST",
+      body: JSON.stringify({ knowledgeRepositoryId }),
     }),
   prepare: (taskId: string) =>
     request<Task>(`/api/tasks/${taskId}/prepare`, { method: "POST" }),

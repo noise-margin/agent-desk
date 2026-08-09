@@ -11,6 +11,8 @@ import type {
   HealthResponse,
   ResolveInteractionInput,
   SaveRegisteredRepositoryInput,
+  SaveKnowledgeRepositoryInput,
+  TaskKnowledgeRepository,
 } from "@agentdesk/protocol";
 import { config } from "./config.js";
 import { EventBus } from "./event-bus.js";
@@ -32,6 +34,7 @@ const createTaskSchema = z.object({
       }),
     )
     .default([]),
+  knowledgeRepositoryIds: z.array(z.string().uuid()).default([]),
   source: z.object({
     type: z.enum(["manual", "aone", "api", "import"]),
     label: z.string().trim().min(1).max(80),
@@ -78,6 +81,10 @@ const registeredRepositorySchema = z.object({
   defaultBranch: z.string().trim().max(300).optional(),
 });
 
+const knowledgeRepositorySchema = registeredRepositorySchema.extend({
+  description: z.string().trim().max(1_000).optional(),
+});
+
 const addTaskRepositorySchema = z.object({
   registeredRepositoryId: z.string().uuid().optional(),
   sourcePath: z.string().trim().min(1).max(2_000).optional(),
@@ -85,6 +92,8 @@ const addTaskRepositorySchema = z.object({
 }).refine((value) => Boolean(value.registeredRepositoryId || value.sourcePath), {
   message: "请选择已登记仓库或填写仓库路径",
 });
+
+const addTaskKnowledgeRepositorySchema = z.object({ knowledgeRepositoryId: z.string().uuid() });
 
 const organizationSchema = z.object({
   tags: z.array(z.string().trim().min(1).max(40)).max(20),
@@ -134,6 +143,34 @@ export async function registerRoutes(
   app.get("/api/tasks", async () => store.listTasks());
 
   app.get("/api/registered-repositories", async () => store.listRegisteredRepositories());
+
+  app.get("/api/knowledge-repositories", async () => store.listKnowledgeRepositories());
+
+  app.post("/api/knowledge-repositories", async (request, reply) => {
+    const parsed = knowledgeRepositorySchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message });
+    try {
+      const inspected = await workspace.inspectRepository(parsed.data.sourcePath, parsed.data.defaultBranch);
+      return reply.code(201).send(store.createKnowledgeRepository({
+        name: parsed.data.name || inspected.suggestedName,
+        sourcePath: inspected.sourcePath,
+        defaultBranch: inspected.defaultBranch,
+        description: parsed.data.description,
+      } as Required<Omit<SaveKnowledgeRepositoryInput, "description">> & { description?: string }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return reply.code(message.includes("UNIQUE constraint") ? 409 : 400).send({ error: message });
+    }
+  });
+
+  app.delete<{ Params: { id: string } }>("/api/knowledge-repositories/:id", async (request, reply) => {
+    try {
+      if (!store.deleteKnowledgeRepository(request.params.id)) return reply.code(404).send({ error: "知识库不存在" });
+      return { ok: true };
+    } catch {
+      return reply.code(409).send({ error: "知识库仍被任务关联，不能移除" });
+    }
+  });
 
   app.post("/api/registered-repositories", async (request, reply) => {
     const parsed = registeredRepositorySchema.safeParse(request.body);
@@ -434,6 +471,26 @@ export async function registerRoutes(
       return { task: store.getTask(task.id)!, repository: attached, agentNotified };
     } catch (error) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+
+  app.post<{ Params: { id: string } }>("/api/tasks/:id/knowledge-repositories", async (request, reply) => {
+    const parsed = addTaskKnowledgeRepositorySchema.safeParse(request.body);
+    if (!parsed.success) return reply.code(400).send({ error: parsed.error.issues[0]?.message });
+    const task = store.getTask(request.params.id);
+    if (!task) return reply.code(404).send({ error: "任务不存在" });
+    if (task.sessions.some((session) => ["starting", "running", "waiting_user"].includes(session.status))) {
+      return reply.code(409).send({ error: "请等待当前 Agent 执行结束后再关联知识库" });
+    }
+    let linked: TaskKnowledgeRepository | undefined;
+    try {
+      linked = store.addTaskKnowledgeRepository(task.id, parsed.data.knowledgeRepositoryId);
+      const prepared = await workspace.attachKnowledgeRepository(task.id, linked.id);
+      const linkedId = linked.id;
+      return reply.code(201).send({ task: prepared, knowledgeRepository: prepared.knowledgeRepositories.find((item) => item.id === linkedId)! });
+    } catch (error) {
+      if (linked) store.removeTaskKnowledgeRepository(linked.id);
+      return reply.code(409).send({ error: error instanceof Error ? error.message : String(error) });
     }
   });
 

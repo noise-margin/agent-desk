@@ -2,6 +2,7 @@ import {
   Activity,
   AlertTriangle,
   Bot,
+  BookOpen,
   Braces,
   Check,
   CheckCircle2,
@@ -402,6 +403,7 @@ function TaskDetail({
   const [debugOpen, setDebugOpen] = useState(false);
   const [previewMaterialId, setPreviewMaterialId] = useState<string>();
   const [addRepositoryOpen, setAddRepositoryOpen] = useState(false);
+  const [addKnowledgeOpen, setAddKnowledgeOpen] = useState(false);
   const pending = task.interactions.filter((item) => item.status === "pending");
   const busy = task.sessions.some((session) => ["starting", "running", "waiting_user"].includes(session.status));
 
@@ -583,6 +585,17 @@ function TaskDetail({
               {shortPath(task.workspacePath)}
             </button>
           </ContextGroup>
+          <ContextGroup title="关联知识库" count={task.knowledgeRepositories.length}>
+            {task.knowledgeRepositories.map((repository) => (
+              <div className="repo-context" key={repository.id}>
+                <div><BookOpen size={14} /><strong>{repository.name}</strong></div>
+                <span>{shortPath(repository.worktreePath ?? repository.sourcePath)}</span>
+                {repository.taskBranch && <code><GitBranch size={12} />{repository.taskBranch}</code>}
+              </div>
+            ))}
+            {!task.knowledgeRepositories.length && <SmallEmpty>未关联；本任务不会检索或沉淀知识</SmallEmpty>}
+            <button className="material-upload repository-add-button" disabled={busy} onClick={() => setAddKnowledgeOpen(true)}><Plus size={13} />关联知识库</button>
+          </ContextGroup>
           {latestSession?.providerSessionId && (
             <ContextGroup title={`${agentMeta[latestSession.provider].name} Session · ${latestSessionAction?.type ?? "任务"}`}>
               <code className="session-id" title={latestSession.providerSessionId}>
@@ -689,6 +702,9 @@ function TaskDetail({
           onChanged={onChanged}
           notify={notify}
         />
+      )}
+      {addKnowledgeOpen && (
+        <AddTaskKnowledgeDialog task={task} onClose={() => setAddKnowledgeOpen(false)} onChanged={onChanged} notify={notify} />
       )}
       {debugOpen && <DebugDialog taskId={task.id} onClose={() => setDebugOpen(false)} />}
     </div>
@@ -1683,12 +1699,41 @@ function AddTaskRepositoryDialog({
   );
 }
 
+function AddTaskKnowledgeDialog({ task, onClose, onChanged, notify }: { task: Task; onClose(): void; onChanged(): void; notify(message: string): void }) {
+  const repositories = useQuery({ queryKey: ["knowledge-repositories"], queryFn: api.knowledgeRepositories });
+  const [selectedId, setSelectedId] = useState("");
+  const linked = new Set(task.knowledgeRepositories.map((item) => item.knowledgeRepositoryId));
+  const available = (repositories.data ?? []).filter((item) => !linked.has(item.id));
+  const add = useMutation({
+    mutationFn: () => api.addTaskKnowledgeRepository(task.id, selectedId),
+    onSuccess: () => { onChanged(); onClose(); notify("知识库已关联并创建任务 worktree"); },
+  });
+  return <div className="dialog-backdrop" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
+    <form className="dialog add-repository-dialog" onSubmit={(event) => { event.preventDefault(); add.mutate(); }}>
+      <header><div><span className="dialog-icon"><BookOpen size={18} /></span><div><h2>关联知识库</h2><p>为当前任务创建隔离的知识分支和 Git worktree</p></div></div><button type="button" className="icon-button" onClick={onClose}><X size={18} /></button></header>
+      <div className="dialog-body"><div className="repository-picker runtime-repository-picker">
+        {available.map((repository) => <label className={selectedId === repository.id ? "selected" : ""} key={repository.id}>
+          <input type="radio" checked={selectedId === repository.id} onChange={() => setSelectedId(repository.id)} />
+          <BookOpen size={15} /><span><strong>{repository.name}</strong><small>{repository.description || repository.sourcePath}</small></span><code>{repository.defaultBranch}</code>{selectedId === repository.id && <Check size={14} />}
+        </label>)}
+        {!repositories.isLoading && !available.length && <SmallEmpty>没有其他可关联的知识库</SmallEmpty>}
+      </div>{add.error && <ErrorBanner error={add.error} />}</div>
+      <footer><button type="button" className="secondary-button" onClick={onClose}>取消</button><button className="primary-button" disabled={!selectedId || add.isPending}>{add.isPending ? <LoaderCircle className="spin" size={14} /> : <Plus size={14} />}关联</button></footer>
+    </form>
+  </div>;
+}
+
 function SettingsDialog({ onClose, notify }: { onClose(): void; notify(message: string): void }) {
   const client = useQueryClient();
   const repositories = useQuery({ queryKey: ["registered-repositories"], queryFn: api.registeredRepositories });
+  const knowledgeRepositories = useQuery({ queryKey: ["knowledge-repositories"], queryFn: api.knowledgeRepositories });
   const [name, setName] = useState("");
   const [sourcePath, setSourcePath] = useState("");
   const [defaultBranch, setDefaultBranch] = useState("");
+  const [knowledgeName, setKnowledgeName] = useState("");
+  const [knowledgePath, setKnowledgePath] = useState("");
+  const [knowledgeBranch, setKnowledgeBranch] = useState("");
+  const [knowledgeDescription, setKnowledgeDescription] = useState("");
   const create = useMutation({
     mutationFn: api.createRegisteredRepository,
     onSuccess: async () => {
@@ -1704,6 +1749,21 @@ function SettingsDialog({ onClose, notify }: { onClose(): void; notify(message: 
     onSuccess: async () => {
       await client.invalidateQueries({ queryKey: ["registered-repositories"] });
       notify("已从仓库库移除，不会删除本地代码");
+    },
+  });
+  const createKnowledge = useMutation({
+    mutationFn: api.createKnowledgeRepository,
+    onSuccess: async () => {
+      await client.invalidateQueries({ queryKey: ["knowledge-repositories"] });
+      setKnowledgeName(""); setKnowledgePath(""); setKnowledgeBranch(""); setKnowledgeDescription("");
+      notify("知识库已登记");
+    },
+  });
+  const removeKnowledge = useMutation({
+    mutationFn: api.deleteKnowledgeRepository,
+    onSuccess: async () => {
+      await client.invalidateQueries({ queryKey: ["knowledge-repositories"] });
+      notify("知识库已从应用设置移除，不会删除本地仓库");
     },
   });
   return (
@@ -1739,6 +1799,32 @@ function SettingsDialog({ onClose, notify }: { onClose(): void; notify(message: 
               {!repositories.isLoading && !repositories.data?.length && <SmallEmpty>还没有登记仓库</SmallEmpty>}
             </div>
           </section>
+          <section className="settings-section">
+            <div className="settings-section-heading"><div><strong>本地知识库</strong><span>独立 Git 仓库；任务可选择多个，并为每个任务创建隔离 worktree。</span></div><b>{knowledgeRepositories.data?.length ?? 0}</b></div>
+            <form className="repository-register-form" onSubmit={(event) => {
+              event.preventDefault();
+              createKnowledge.mutate({ name: knowledgeName.trim() || undefined, sourcePath: knowledgePath, defaultBranch: knowledgeBranch.trim() || undefined, description: knowledgeDescription.trim() || undefined });
+            }}>
+              <input value={knowledgeName} onChange={(event) => setKnowledgeName(event.target.value)} placeholder="知识库名称（可选）" />
+              <input value={knowledgePath} onChange={(event) => setKnowledgePath(event.target.value)} placeholder="本地知识库 Git 路径" required />
+              <input value={knowledgeBranch} onChange={(event) => setKnowledgeBranch(event.target.value)} placeholder="主干分支（默认当前分支）" />
+              <input value={knowledgeDescription} onChange={(event) => setKnowledgeDescription(event.target.value)} placeholder="适用范围说明（可选）" />
+              <button className="primary-button" disabled={createKnowledge.isPending || !knowledgePath.trim()}>{createKnowledge.isPending ? <LoaderCircle className="spin" size={14} /> : <Plus size={14} />}登记知识库</button>
+            </form>
+            {createKnowledge.error && <ErrorBanner error={createKnowledge.error} />}
+            <div className="registered-repository-list">
+              {knowledgeRepositories.data?.map((repository) => (
+                <article key={repository.id}>
+                  <span><BookOpen size={16} /></span>
+                  <div><strong>{repository.name}</strong><code title={repository.sourcePath}>{repository.sourcePath}</code><small><GitBranch size={11} />{repository.defaultBranch}{repository.description ? ` · ${repository.description}` : ""}</small></div>
+                  <button className="icon-button" aria-label={`移除知识库 ${repository.name}`} disabled={removeKnowledge.isPending} onClick={() => {
+                    if (window.confirm(`从应用设置移除知识库“${repository.name}”？不会删除本地仓库。`)) removeKnowledge.mutate(repository.id);
+                  }}><Trash2 size={15} /></button>
+                </article>
+              ))}
+              {!knowledgeRepositories.isLoading && !knowledgeRepositories.data?.length && <SmallEmpty>还没有登记知识库</SmallEmpty>}
+            </div>
+          </section>
         </div>
         <footer><button className="primary-button" onClick={onClose}>完成</button></footer>
       </section>
@@ -1758,12 +1844,14 @@ function NewTaskDialog({
   const [provider, setProvider] = useState<AgentProvider>("codex");
   const collections = useQuery({ queryKey: ["task-collections"], queryFn: api.collections });
   const registeredRepositories = useQuery({ queryKey: ["registered-repositories"], queryFn: api.registeredRepositories });
+  const knowledgeRepositories = useQuery({ queryKey: ["knowledge-repositories"], queryFn: api.knowledgeRepositories });
   const [tagsText, setTagsText] = useState("");
   const [collectionId, setCollectionId] = useState("");
   const [acceptanceCriteria, setAcceptanceCriteria] = useState("");
   const [deliveryTarget, setDeliveryTarget] = useState("");
   const [requirement, setRequirement] = useState("");
   const [selectedRepositoryIds, setSelectedRepositoryIds] = useState<string[]>([]);
+  const [selectedKnowledgeRepositoryIds, setSelectedKnowledgeRepositoryIds] = useState<string[]>([]);
   const [repositories, setRepositories] = useState<TaskRepositoryInput[]>([]);
   const [files, setFiles] = useState<File[]>([]);
   const create = useMutation({
@@ -1789,6 +1877,7 @@ function NewTaskDialog({
       provider,
       requirement,
       repositories: uniqueRepositories,
+      knowledgeRepositoryIds: selectedKnowledgeRepositoryIds,
       source: { type: "manual", label: "直接创建" },
       tags: tagsText.split(/[,，]/).map((tag) => tag.trim()).filter(Boolean),
       collectionId: collectionId || undefined,
@@ -1842,6 +1931,26 @@ function NewTaskDialog({
             <span>需求说明</span>
             <textarea value={requirement} onChange={(event) => setRequirement(event.target.value)} placeholder="粘贴 PRD、会议结论、验收条件或其他上下文…" rows={5} />
           </label>
+          <div className="field">
+            <div className="field-heading"><span>关联知识库（可选）</span></div>
+            <div className="repository-picker">
+              {knowledgeRepositories.data?.map((repository) => {
+                const selected = selectedKnowledgeRepositoryIds.includes(repository.id);
+                return (
+                  <label className={selected ? "selected" : ""} key={repository.id}>
+                    <input type="checkbox" checked={selected} onChange={() => setSelectedKnowledgeRepositoryIds((current) => selected ? current.filter((id) => id !== repository.id) : [...current, repository.id])} />
+                    <BookOpen size={15} />
+                    <span><strong>{repository.name}</strong><small title={repository.sourcePath}>{repository.description || repository.sourcePath}</small></span>
+                    <code>{repository.defaultBranch}</code>
+                    {selected && <Check size={14} />}
+                  </label>
+                );
+              })}
+              {!knowledgeRepositories.isLoading && !knowledgeRepositories.data?.length && (
+                <div className="repository-picker-empty"><Settings2 size={14} /><span>尚未登记知识库，可在应用设置中添加；不选择时不会执行知识检索与沉淀。</span></div>
+              )}
+            </div>
+          </div>
           <div className="field">
             <div className="field-heading"><span>关联代码仓库</span><button type="button" className="text-button" onClick={() => setRepositories((current) => [...current, { sourcePath: "", baseBranch: "" }])}><Plus size={13} />临时添加路径</button></div>
             <div className="repository-picker">

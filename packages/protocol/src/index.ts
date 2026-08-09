@@ -50,6 +50,36 @@ export interface SaveRegisteredRepositoryInput {
   defaultBranch?: string;
 }
 
+export interface KnowledgeRepository {
+  id: string;
+  name: string;
+  sourcePath: string;
+  defaultBranch: string;
+  description?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SaveKnowledgeRepositoryInput {
+  name?: string;
+  sourcePath: string;
+  defaultBranch?: string;
+  description?: string;
+}
+
+export interface TaskKnowledgeRepository {
+  id: string;
+  taskId: string;
+  knowledgeRepositoryId: string;
+  name: string;
+  sourcePath: string;
+  defaultBranch: string;
+  description?: string;
+  worktreePath?: string;
+  taskBranch?: string;
+  baseCommit?: string;
+}
+
 export interface TaskRepository extends TaskRepositoryInput {
   id: string;
   taskId: string;
@@ -102,6 +132,7 @@ export interface TaskActivity {
 }
 
 export type TaskAction =
+  | "retrieve_knowledge"
   | "generate_plan"
   | "revise_plan"
   | "accept_plan"
@@ -140,7 +171,7 @@ export interface ActionRun {
   createdAt: string;
 }
 
-export type ActionArtifactKind = "plan" | "development" | "review" | "acceptance" | "delivery" | "knowledge" | "feedback" | "test";
+export type ActionArtifactKind = "plan" | "development" | "review" | "acceptance" | "delivery" | "knowledge" | "knowledge_retrieval" | "feedback" | "test";
 
 export interface ActionArtifact {
   id: string;
@@ -329,6 +360,7 @@ export interface Task {
   collectionId?: string;
   collection?: TaskCollection;
   repositories: TaskRepository[];
+  knowledgeRepositories: TaskKnowledgeRepository[];
   materials: Material[];
   sessions: AgentSession[];
   interactions: PendingInteraction[];
@@ -346,6 +378,7 @@ export interface CreateTaskInput {
   provider: AgentProvider;
   requirement?: string;
   repositories: TaskRepositoryInput[];
+  knowledgeRepositoryIds?: string[];
   source?: TaskSource;
   tags?: string[];
   collectionId?: string;

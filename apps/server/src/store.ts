@@ -11,16 +11,19 @@ import type {
   CodeSnapshot,
   CreateTaskInput,
   InteractionType,
+  KnowledgeRepository,
   Material,
   PendingInteraction,
   RegisteredRepository,
   SaveRegisteredRepositoryInput,
+  SaveKnowledgeRepositoryInput,
   Task,
   TaskActivity,
   TaskActivityType,
   TaskCollection,
   TaskRepository,
   TaskRepositoryInput,
+  TaskKnowledgeRepository,
   TaskStatus,
 } from "@agentdesk/protocol";
 import { randomUUID } from "node:crypto";
@@ -61,6 +64,15 @@ function mapRegisteredRepository(row: Record<string, unknown>): RegisteredReposi
     defaultBranch: String(row.default_branch),
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
+  };
+}
+
+function mapKnowledgeRepository(row: Record<string, unknown>): KnowledgeRepository {
+  return {
+    id: String(row.id), name: String(row.name), sourcePath: String(row.source_path),
+    defaultBranch: String(row.default_branch),
+    description: row.description ? String(row.description) : undefined,
+    createdAt: String(row.created_at), updatedAt: String(row.updated_at),
   };
 }
 
@@ -141,6 +153,24 @@ export class Store {
         default_branch TEXT NOT NULL,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS knowledge_repositories (
+        id TEXT PRIMARY KEY,
+        name TEXT NOT NULL,
+        source_path TEXT NOT NULL UNIQUE,
+        default_branch TEXT NOT NULL,
+        description TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS task_knowledge_repositories (
+        id TEXT PRIMARY KEY,
+        task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE,
+        knowledge_repository_id TEXT NOT NULL REFERENCES knowledge_repositories(id) ON DELETE RESTRICT,
+        worktree_path TEXT,
+        task_branch TEXT,
+        base_commit TEXT,
+        UNIQUE(task_id, knowledge_repository_id)
       );
       CREATE TABLE IF NOT EXISTS materials (
         id TEXT PRIMARY KEY,
@@ -313,6 +343,15 @@ export class Store {
         insertRepo.run(randomUUID(), id, sourcePath, repo.baseBranch?.trim() || null);
       }
 
+      const insertKnowledge = this.db.prepare(
+        `INSERT INTO task_knowledge_repositories (id,task_id,knowledge_repository_id) VALUES (?,?,?)`,
+      );
+      for (const knowledgeRepositoryId of [...new Set(input.knowledgeRepositoryIds ?? [])]) {
+        if (this.getKnowledgeRepository(knowledgeRepositoryId)) {
+          insertKnowledge.run(randomUUID(), id, knowledgeRepositoryId);
+        }
+      }
+
       if (input.requirement?.trim()) {
         const materialId = randomUUID();
         this.db
@@ -371,6 +410,28 @@ export class Store {
     return this.db.prepare("DELETE FROM registered_repositories WHERE id=?").run(id).changes > 0;
   }
 
+  listKnowledgeRepositories(): KnowledgeRepository[] {
+    const rows = this.db.prepare("SELECT * FROM knowledge_repositories ORDER BY name COLLATE NOCASE").all() as Record<string, unknown>[];
+    return rows.map(mapKnowledgeRepository);
+  }
+
+  getKnowledgeRepository(id: string): KnowledgeRepository | undefined {
+    const row = this.db.prepare("SELECT * FROM knowledge_repositories WHERE id=?").get(id) as Record<string, unknown> | undefined;
+    return row ? mapKnowledgeRepository(row) : undefined;
+  }
+
+  createKnowledgeRepository(input: Required<Omit<SaveKnowledgeRepositoryInput, "description">> & { description?: string }): KnowledgeRepository {
+    const id = randomUUID();
+    const timestamp = now();
+    this.db.prepare(`INSERT INTO knowledge_repositories (id,name,source_path,default_branch,description,created_at,updated_at) VALUES (?,?,?,?,?,?,?)`)
+      .run(id, input.name.trim(), input.sourcePath, input.defaultBranch, input.description?.trim() || null, timestamp, timestamp);
+    return this.getKnowledgeRepository(id)!;
+  }
+
+  deleteKnowledgeRepository(id: string): boolean {
+    return this.db.prepare("DELETE FROM knowledge_repositories WHERE id=?").run(id).changes > 0;
+  }
+
   getTask(id: string): Task | undefined {
     const row = this.db.prepare("SELECT * FROM tasks WHERE id = ?").get(id) as
       | Record<string, unknown>
@@ -394,6 +455,7 @@ export class Store {
       collectionId: row.collection_id ? String(row.collection_id) : undefined,
       collection: row.collection_id ? this.getCollection(String(row.collection_id)) : undefined,
       repositories: this.repositories(id),
+      knowledgeRepositories: this.taskKnowledgeRepositories(id),
       materials: this.materials(id),
       sessions: this.sessions(id),
       interactions: this.interactions(id),
@@ -501,6 +563,39 @@ export class Store {
          WHERE id=?`,
       )
       .run(patch.baseBranch, patch.worktreePath, patch.taskBranch, patch.baseCommit, id);
+  }
+
+  private taskKnowledgeRepositories(taskId: string): TaskKnowledgeRepository[] {
+    const rows = this.db.prepare(`SELECT tkr.*,kr.name,kr.source_path,kr.default_branch,kr.description
+      FROM task_knowledge_repositories tkr JOIN knowledge_repositories kr ON kr.id=tkr.knowledge_repository_id
+      WHERE tkr.task_id=? ORDER BY tkr.rowid`).all(taskId) as Record<string, unknown>[];
+    return rows.map((row) => ({
+      id: String(row.id), taskId: String(row.task_id), knowledgeRepositoryId: String(row.knowledge_repository_id),
+      name: String(row.name), sourcePath: String(row.source_path), defaultBranch: String(row.default_branch),
+      description: row.description ? String(row.description) : undefined,
+      worktreePath: row.worktree_path ? String(row.worktree_path) : undefined,
+      taskBranch: row.task_branch ? String(row.task_branch) : undefined,
+      baseCommit: row.base_commit ? String(row.base_commit) : undefined,
+    }));
+  }
+
+  updateTaskKnowledgeRepository(id: string, patch: { worktreePath: string; taskBranch: string; baseCommit: string }) {
+    this.db.prepare(`UPDATE task_knowledge_repositories SET worktree_path=?,task_branch=?,base_commit=? WHERE id=?`)
+      .run(patch.worktreePath, patch.taskBranch, patch.baseCommit, id);
+  }
+
+  addTaskKnowledgeRepository(taskId: string, knowledgeRepositoryId: string): TaskKnowledgeRepository {
+    if (!this.getTask(taskId)) throw new Error("任务不存在");
+    if (!this.getKnowledgeRepository(knowledgeRepositoryId)) throw new Error("知识库不存在");
+    const id = randomUUID();
+    this.db.prepare(`INSERT INTO task_knowledge_repositories (id,task_id,knowledge_repository_id) VALUES (?,?,?)`)
+      .run(id, taskId, knowledgeRepositoryId);
+    this.db.prepare("UPDATE tasks SET updated_at=? WHERE id=?").run(now(), taskId);
+    return this.taskKnowledgeRepositories(taskId).find((item) => item.id === id)!;
+  }
+
+  removeTaskKnowledgeRepository(id: string): boolean {
+    return this.db.prepare("DELETE FROM task_knowledge_repositories WHERE id=? AND worktree_path IS NULL").run(id).changes > 0;
   }
 
   private materials(taskId: string): Material[] {
